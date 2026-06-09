@@ -182,4 +182,6 @@ To authenticate with Shikimori:
 
 ## Credits
 
-This script was inspired by [mpv-open-anilist-page](https://github.com/ehoneyse/mpv-open-anilist-page) by ehoneyse.
+- This script was inspired by [mpv-open-anilist-page](https://github.com/ehoneyse/mpv-open-anilist-page) by ehoneyse.
+- MyAnimeList integration is based on [mpv-mal-updater](https://github.com/locomotiv1/mpv-mal-updater) by locomotiv1.
+
