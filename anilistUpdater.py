@@ -580,13 +580,8 @@ class AniListUpdater:
             update_data["status"] = mal_status
         if is_rewatching:
             update_data["is_rewatching"] = True
-
-        print(f"Updating MAL (ID: {mal_id}) to status: {mal_status}, progress: {progress}, is_rewatching: {is_rewatching}")
         response = self._make_mal_api_request(endpoint, method="PATCH", data=update_data)
-        if response and "num_episodes_watched" in response:
-            print(f"MAL updated successfully! Progress: {response['num_episodes_watched']}, Status: {response['status']}")
-            osd_message(f"MAL updated to: {response['num_episodes_watched']}")
-        else:
+        if not response or "num_episodes_watched" not in response:
             print("Failed to update MAL entry.")
 
     # ──────────────────────────────────────────────────────────────────────────────────────────────────
@@ -752,7 +747,6 @@ class AniListUpdater:
         rewatches_to_set = None
         if current_status == "rewatching" and shiki_status == "completed":
             rewatches_to_set = current_rewatches + 1
-            print(f"Shikimori: Completing rewatch. Incrementing rewatches to {rewatches_to_set}")
 
         # Step 3: Perform POST or PATCH
         if rate_id is not None:
@@ -766,7 +760,6 @@ class AniListUpdater:
                 user_rate_data["rewatches"] = rewatches_to_set
 
             payload = {"user_rate": user_rate_data}
-            print(f"Updating Shikimori (Rate ID: {rate_id}) to status: {shiki_status}, progress: {progress}")
             response = self._make_shiki_api_request(endpoint, method="PATCH", json_data=payload)
         else:
             endpoint = "v2/user_rates"
@@ -781,15 +774,9 @@ class AniListUpdater:
                 user_rate_data["status"] = shiki_status
 
             payload = {"user_rate": user_rate_data}
-            print(f"Adding to Shikimori (Anime ID: {mal_id}) with status: {shiki_status}, progress: {progress}")
             response = self._make_shiki_api_request(endpoint, method="POST", json_data=payload)
 
-        if response and "id" in response:
-            updated_episodes = response.get("episodes")
-            updated_status = response.get("status")
-            print(f"Shikimori updated successfully! Progress: {updated_episodes}, Status: {updated_status}")
-            osd_message(f"Shikimori updated to: {updated_episodes}")
-        else:
+        if not response or "id" not in response:
             print("Failed to update Shikimori entry.")
 
     # ──────────────────────────────────────────────────────────────────────────────────────────────────
