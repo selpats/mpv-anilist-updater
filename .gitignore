@@ -2,3 +2,5 @@ anilistToken.txt
 cache.json
 __pycache__
 .vscode
+mal_auth.json
+shiki_auth.json

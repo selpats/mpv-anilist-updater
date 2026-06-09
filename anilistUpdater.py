@@ -243,6 +243,11 @@ class AniListUpdater:
         self.CORRECTED_CACHE_REFRESH_RATE = AniListUpdater.CORRECTED_CACHE_REFRESH_RATE
 
         self.CACHE_MODE = str(self.options.get("CACHE_MODE", self.CACHE_MODE)).upper()
+        self.mal_auth_path: str = os.path.join(os.path.dirname(__file__), "mal_auth.json")
+        self.mal_access_token: str | None = None
+        self.shiki_auth_path: str = os.path.join(os.path.dirname(__file__), "shiki_auth.json")
+        self.shiki_access_token: str | None = None
+        self.shiki_user_id: int | None = None
 
     # Load token from anilistToken.txt
     def _load_access_token(self) -> str | None:
@@ -439,6 +444,353 @@ class AniListUpdater:
         error_msg = response_json.get("errors", [{}])[0].get("message", "Unknown error")
         osd_message(f"API request failed: {error_msg}")
         raise Exception(f"API request failed: {response.status_code} - {error_msg}")
+
+    # ──────────────────────────────────────────────────────────────────────────────────────────────────
+    # MYANIMELIST API COMMUNICATION
+    # ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+    def _load_mal_access_token(self) -> str | None:
+        """
+        Load MAL access token from JSON file.
+
+        Returns:
+            str | None: Access token or None if not found.
+        """
+        try:
+            if not os.path.exists(self.mal_auth_path):
+                return None
+            with open(self.mal_auth_path, encoding="utf-8") as f:
+                auth_data = json.load(f)
+            return auth_data.get("access_token")
+        except Exception as e:
+            print(f"Error reading MAL access token: {e}")
+            return None
+
+    def _refresh_mal_access_token(self) -> bool:
+        """Attempt to refresh the MAL access token."""
+        print("MAL access token expired. Attempting to refresh...")
+        try:
+            if not os.path.exists(self.mal_auth_path):
+                return False
+            with open(self.mal_auth_path, encoding="utf-8") as f:
+                auth_data = json.load(f)
+
+            client_id = auth_data.get("client_id")
+            refresh_token = auth_data.get("refresh_token")
+
+            if not client_id or not refresh_token:
+                print("Missing client_id or refresh_token in mal_auth.json. Please run setup_auth.py.")
+                return False
+
+            data = {
+                "client_id": client_id,
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+            }
+
+            response = requests.post("https://myanimelist.net/v1/oauth2/token", data=data, timeout=10)
+
+            if response.status_code == 200:
+                token_data = response.json()
+                auth_data["access_token"] = token_data["access_token"]
+                auth_data["refresh_token"] = token_data["refresh_token"]
+
+                with open(self.mal_auth_path, "w", encoding="utf-8") as f:
+                    json.dump(auth_data, f, indent=4)
+
+                self.mal_access_token = token_data["access_token"]
+                print("MAL token refreshed successfully!")
+                return True
+            else:
+                print(f"Failed to refresh MAL token: {response.status_code} - {response.text}")
+                return False
+        except Exception as e:
+            print(f"Error during MAL token refresh: {e}")
+            return False
+
+    def _make_mal_api_request(
+        self, endpoint: str, method: str = "GET", data: dict[str, Any] | None = None, is_retry: bool = False
+    ) -> dict[str, Any] | None:
+        """Make REST request to MyAnimeList API v2."""
+        if not self.mal_access_token:
+            self.mal_access_token = self._load_mal_access_token()
+            if not self.mal_access_token:
+                return None
+
+        headers = {"Authorization": f"Bearer {self.mal_access_token}"}
+        url = f"https://api.myanimelist.net/v2/{endpoint}"
+
+        try:
+            if method == "GET":
+                response = requests.get(url, headers=headers, params=data, timeout=10)
+            elif method in {"PATCH", "POST", "PUT"}:
+                headers["Content-Type"] = "application/x-www-form-urlencoded"
+                response = requests.patch(url, headers=headers, data=data, timeout=10)
+            else:
+                print(f"Unsupported HTTP method: {method}")
+                return None
+
+            if response.status_code == 401 and not is_retry:
+                if self._refresh_mal_access_token():
+                    return self._make_mal_api_request(endpoint, method, data, is_retry=True)
+
+            if response.status_code in {200, 201, 204}:
+                return response.json() if response.text else {}
+
+            print(f"MAL API request failed: {response.status_code} - {response.text}\nEndpoint: {endpoint}")
+            return None
+        except Exception as e:
+            print(f"MAL Request error: {e}")
+            return None
+
+    def update_mal_entry(
+        self, mal_id: int | None, status: str | None, progress: int | None, is_rewatching: bool = False
+    ) -> None:
+        """Update episode progress and/or status on MyAnimeList."""
+        if mal_id is None:
+            return
+
+        if not os.path.exists(self.mal_auth_path):
+            return
+
+        # Map AniList status to MAL status
+        mal_status = None
+        if status:
+            status_upper = status.upper()
+            status_map = {
+                "CURRENT": "watching",
+                "PLANNING": "plan_to_watch",
+                "COMPLETED": "completed",
+                "DROPPED": "dropped",
+                "PAUSED": "on_hold",
+                "REPEATING": "watching",
+            }
+            if status_upper in status_map:
+                mal_status = status_map[status_upper]
+                if status_upper == "REPEATING":
+                    is_rewatching = True
+            else:
+                mal_status = status
+
+        endpoint = f"anime/{mal_id}/my_list_status"
+        update_data: dict[str, Any] = {}
+        if progress is not None:
+            update_data["num_watched_episodes"] = progress
+        if mal_status:
+            update_data["status"] = mal_status
+        if is_rewatching:
+            update_data["is_rewatching"] = True
+
+        print(f"Updating MAL (ID: {mal_id}) to status: {mal_status}, progress: {progress}, is_rewatching: {is_rewatching}")
+        response = self._make_mal_api_request(endpoint, method="PATCH", data=update_data)
+        if response and "num_episodes_watched" in response:
+            print(f"MAL updated successfully! Progress: {response['num_episodes_watched']}, Status: {response['status']}")
+            osd_message(f"MAL updated to: {response['num_episodes_watched']}")
+        else:
+            print("Failed to update MAL entry.")
+
+    # ──────────────────────────────────────────────────────────────────────────────────────────────────
+    # SHIKIMORI API COMMUNICATION
+    # ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+    def _load_shiki_credentials(self) -> tuple[str | None, int | None]:
+        """
+        Load Shikimori access token and user ID from JSON file.
+
+        Returns:
+            tuple[str | None, int | None]: Access token and user ID.
+        """
+        try:
+            if not os.path.exists(self.shiki_auth_path):
+                return None, None
+            with open(self.shiki_auth_path, encoding="utf-8") as f:
+                auth_data = json.load(f)
+            return auth_data.get("access_token"), auth_data.get("user_id")
+        except Exception as e:
+            print(f"Error reading Shikimori credentials: {e}")
+            return None, None
+
+    def _refresh_shiki_access_token(self) -> bool:
+        """Attempt to refresh the Shikimori access token."""
+        print("Shikimori access token expired. Attempting to refresh...")
+        try:
+            if not os.path.exists(self.shiki_auth_path):
+                return False
+            with open(self.shiki_auth_path, encoding="utf-8") as f:
+                auth_data = json.load(f)
+
+            client_id = auth_data.get("client_id")
+            client_secret = auth_data.get("client_secret")
+            refresh_token = auth_data.get("refresh_token")
+
+            if not client_id or not client_secret or not refresh_token:
+                print("Missing client_id, client_secret, or refresh_token in shiki_auth.json. Please run setup_auth_shiki.py.")
+                return False
+
+            headers = {
+                "User-Agent": "mpv-anilist-updater",
+                "Content-Type": "application/x-www-form-urlencoded"
+            }
+            data = {
+                "grant_type": "refresh_token",
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "refresh_token": refresh_token,
+            }
+
+            response = requests.post("https://shikimori.io/oauth/token", headers=headers, data=data, timeout=10)
+
+            if response.status_code == 200:
+                token_data = response.json()
+                auth_data["access_token"] = token_data["access_token"]
+                auth_data["refresh_token"] = token_data["refresh_token"]
+
+                with open(self.shiki_auth_path, "w", encoding="utf-8") as f:
+                    json.dump(auth_data, f, indent=4)
+
+                self.shiki_access_token = token_data["access_token"]
+                print("Shikimori token refreshed successfully!")
+                return True
+            else:
+                print(f"Failed to refresh Shikimori token: {response.status_code} - {response.text}")
+                return False
+        except Exception as e:
+            print(f"Error during Shikimori token refresh: {e}")
+            return False
+
+    def _make_shiki_api_request(
+        self, endpoint: str, method: str = "GET", json_data: dict[str, Any] | None = None, params: dict[str, Any] | None = None, is_retry: bool = False
+    ) -> Any:
+        """Make REST request to Shikimori API."""
+        if not self.shiki_access_token or not self.shiki_user_id:
+            self.shiki_access_token, self.shiki_user_id = self._load_shiki_credentials()
+            if not self.shiki_access_token:
+                return None
+
+        headers = {
+            "Authorization": f"Bearer {self.shiki_access_token}",
+            "User-Agent": "mpv-anilist-updater",
+            "Content-Type": "application/json"
+        }
+        url = f"https://shikimori.io/api/{endpoint}"
+
+        try:
+            if method == "GET":
+                response = requests.get(url, headers=headers, params=params, timeout=10)
+            elif method == "POST":
+                response = requests.post(url, headers=headers, json=json_data, timeout=10)
+            elif method == "PATCH":
+                response = requests.patch(url, headers=headers, json=json_data, timeout=10)
+            else:
+                print(f"Unsupported HTTP method: {method}")
+                return None
+
+            if response.status_code == 401 and not is_retry:
+                if self._refresh_shiki_access_token():
+                    return self._make_shiki_api_request(endpoint, method, json_data, params, is_retry=True)
+
+            if response.status_code in {200, 201, 204}:
+                return response.json() if response.text else {}
+
+            print(f"Shikimori API request failed: {response.status_code} - {response.text}\nEndpoint: {endpoint}")
+            return None
+        except Exception as e:
+            print(f"Shikimori Request error: {e}")
+            return None
+
+    def update_shiki_entry(
+        self, mal_id: int | None, status: str | None, progress: int | None
+    ) -> None:
+        """Update episode progress and/or status on Shikimori."""
+        if mal_id is None:
+            return
+
+        if not os.path.exists(self.shiki_auth_path):
+            return
+
+        if not self.shiki_access_token or not self.shiki_user_id:
+            self.shiki_access_token, self.shiki_user_id = self._load_shiki_credentials()
+            if not self.shiki_access_token or not self.shiki_user_id:
+                return
+
+        # Map AniList status to Shikimori status
+        shiki_status = None
+        if status:
+            status_upper = status.upper()
+            status_map = {
+                "CURRENT": "watching",
+                "PLANNING": "planned",
+                "COMPLETED": "completed",
+                "DROPPED": "dropped",
+                "PAUSED": "on_hold",
+                "REPEATING": "rewatching",
+            }
+            if status_upper in status_map:
+                shiki_status = status_map[status_upper]
+            else:
+                shiki_status = status
+
+        # Step 1: Find existing user rate for this anime
+        params = {
+            "user_id": self.shiki_user_id,
+            "target_id": mal_id,
+            "target_type": "Anime"
+        }
+        rates = self._make_shiki_api_request("v2/user_rates", method="GET", params=params)
+        
+        rate_id = None
+        current_rewatches = 0
+        current_status = None
+
+        if isinstance(rates, list) and len(rates) > 0:
+            rate_entry = rates[0]
+            rate_id = rate_entry.get("id")
+            current_rewatches = rate_entry.get("rewatches", 0)
+            current_status = rate_entry.get("status")
+
+        # Step 2: Determine if we should update rewatches
+        rewatches_to_set = None
+        if current_status == "rewatching" and shiki_status == "completed":
+            rewatches_to_set = current_rewatches + 1
+            print(f"Shikimori: Completing rewatch. Incrementing rewatches to {rewatches_to_set}")
+
+        # Step 3: Perform POST or PATCH
+        if rate_id is not None:
+            endpoint = f"v2/user_rates/{rate_id}"
+            user_rate_data: dict[str, Any] = {}
+            if progress is not None:
+                user_rate_data["episodes"] = progress
+            if shiki_status:
+                user_rate_data["status"] = shiki_status
+            if rewatches_to_set is not None:
+                user_rate_data["rewatches"] = rewatches_to_set
+
+            payload = {"user_rate": user_rate_data}
+            print(f"Updating Shikimori (Rate ID: {rate_id}) to status: {shiki_status}, progress: {progress}")
+            response = self._make_shiki_api_request(endpoint, method="PATCH", json_data=payload)
+        else:
+            endpoint = "v2/user_rates"
+            user_rate_data = {
+                "user_id": self.shiki_user_id,
+                "target_id": mal_id,
+                "target_type": "Anime"
+            }
+            if progress is not None:
+                user_rate_data["episodes"] = progress
+            if shiki_status:
+                user_rate_data["status"] = shiki_status
+
+            payload = {"user_rate": user_rate_data}
+            print(f"Adding to Shikimori (Anime ID: {mal_id}) with status: {shiki_status}, progress: {progress}")
+            response = self._make_shiki_api_request(endpoint, method="POST", json_data=payload)
+
+        if response and "id" in response:
+            updated_episodes = response.get("episodes")
+            updated_status = response.get("status")
+            print(f"Shikimori updated successfully! Progress: {updated_episodes}, Status: {updated_status}")
+            osd_message(f"Shikimori updated to: {updated_episodes}")
+        else:
+            print("Failed to update Shikimori entry.")
 
     # ──────────────────────────────────────────────────────────────────────────────────────────────────
     # SEASON & EPISODE HANDLING
@@ -911,6 +1263,8 @@ class AniListUpdater:
             if not self._save_media_list_entry(anime_id, initial_status, file_progress):
                 raise Exception(f"Failed to add '{anime_name}' to your list.")
 
+            self.update_mal_entry(mal_id, initial_status, file_progress)
+            self.update_shiki_entry(mal_id, initial_status, file_progress)
             osd_message(f'Added "{anime_name}" to your list with progress: {file_progress}')
 
             return AnimeInfo(
@@ -936,6 +1290,8 @@ class AniListUpdater:
             # Step 2: Set progress to 1
             response = self._save_media_list_entry(anime_id, None, 1)
 
+            self.update_mal_entry(mal_id, "watching", 1, is_rewatching=True)
+            self.update_shiki_entry(mal_id, "rewatching", 1)
             updated_progress = response["data"]["SaveMediaListEntry"]["progress"]
             osd_message(f'Updated "{anime_name}" to REPEATING with progress: {updated_progress}')
 
@@ -973,6 +1329,13 @@ class AniListUpdater:
         else:
             response = self._save_media_list_entry(anime_id, None, file_progress)
 
+        self.update_mal_entry(
+            mal_id,
+            status_to_set,
+            file_progress,
+            is_rewatching=(status_to_set == "REPEATING" or current_status == "REPEATING"),
+        )
+        self.update_shiki_entry(mal_id, status_to_set, file_progress)
         updated_progress = response["data"]["SaveMediaListEntry"]["progress"]
         updated_status = response["data"]["SaveMediaListEntry"]["status"]
         osd_message(f'Updated "{anime_name}" to: {updated_progress}')
@@ -1177,6 +1540,10 @@ class AniListUpdater:
             selected_status,
             current_status,
         )
+
+        if status_changed and mal_id:
+            self.update_mal_entry(mal_id, current_status, None)
+            self.update_shiki_entry(mal_id, current_status, None)
 
         changes = [
             f"ID: {existing_anime_id or '?'}->{anilist_id}" if id_changed else None,
