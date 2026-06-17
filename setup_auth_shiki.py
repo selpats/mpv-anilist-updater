@@ -1,12 +1,15 @@
+"""Setup authentication for Shikimori integration."""
+
 import json
-import os
-import urllib.parse
+from pathlib import Path
+
 import requests
 
-AUTH_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shiki_auth.json")
+AUTH_FILE = str(Path(__file__).resolve().parent / "shiki_auth.json")
 
 
-def main():
+def main() -> None:
+    """Run interactive CLI auth setup for Shikimori."""
     print("=== Shikimori MPV Updater Setup ===")
     print("To use this script, you need a Shikimori Client ID and Client Secret.")
     print("1. Go to https://shikimori.io/oauth/applications")
@@ -62,7 +65,7 @@ def main():
             "User-Agent": "mpv-anilist-updater",
         }
         whoami_response = requests.get("https://shikimori.io/api/users/whoami", headers=whoami_headers, timeout=10)
-        
+
         user_id = None
         if whoami_response.status_code == 200:
             user_data = whoami_response.json()
@@ -78,10 +81,10 @@ def main():
             "client_secret": client_secret,
             "access_token": access_token,
             "refresh_token": refresh_token,
-            "user_id": user_id
+            "user_id": user_id,
         }
 
-        with open(AUTH_FILE, "w") as f:
+        with open(AUTH_FILE, "w", encoding="utf-8") as f:
             json.dump(auth_payload, f, indent=4)
 
         print(f"\nSuccess! Authentication data saved to {AUTH_FILE}")

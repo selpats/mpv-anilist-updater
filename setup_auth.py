@@ -1,13 +1,17 @@
+"""Setup authentication for MyAnimeList integration."""
+
 import json
-import os
 import secrets
 import urllib.parse
+from pathlib import Path
+
 import requests
 
-AUTH_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mal_auth.json")
+AUTH_FILE = str(Path(__file__).resolve().parent / "mal_auth.json")
 
 
-def main():
+def main() -> None:
+    """Run interactive CLI auth setup for MyAnimeList."""
     print("=== MyAnimeList MPV Updater Setup ===")
     print("To use this script, you need a MAL Client ID.")
     print("1. Go to https://myanimelist.net/apiconfig")
@@ -56,7 +60,7 @@ def main():
         "grant_type": "authorization_code",
     }
 
-    response = requests.post("https://myanimelist.net/v1/oauth2/token", data=data)
+    response = requests.post("https://myanimelist.net/v1/oauth2/token", data=data, timeout=10)
 
     if response.status_code == 200:
         token_data = response.json()
@@ -68,7 +72,7 @@ def main():
             "refresh_token": token_data["refresh_token"],
         }
 
-        with open(AUTH_FILE, "w") as f:
+        with open(AUTH_FILE, "w", encoding="utf-8") as f:
             json.dump(auth_payload, f, indent=4)
 
         print(f"\nSuccess! Authentication data saved to {AUTH_FILE}")

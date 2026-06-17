@@ -463,50 +463,67 @@ class AniListUpdater:
             print(f"Error reading MAL access token: {e}")
             return None
 
+    def _read_mal_auth(self) -> dict[str, Any] | None:
+        try:
+            if not os.path.exists(self.mal_auth_path):
+                return None
+            with open(self.mal_auth_path, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error reading MAL auth: {e}")
+            return None
+
+    def _write_mal_auth(self, auth_data: dict[str, Any]) -> bool:
+        try:
+            with open(self.mal_auth_path, "w", encoding="utf-8") as f:
+                json.dump(auth_data, f, indent=4)
+            return True
+        except Exception as e:
+            print(f"Error writing MAL auth: {e}")
+            return False
+
     def _refresh_mal_access_token(self) -> bool:
         """Attempt to refresh the MAL access token."""
         print("MAL access token expired. Attempting to refresh...")
-        try:
-            if not os.path.exists(self.mal_auth_path):
-                return False
-            with open(self.mal_auth_path, encoding="utf-8") as f:
-                auth_data = json.load(f)
-
-            client_id = auth_data.get("client_id")
-            refresh_token = auth_data.get("refresh_token")
-
-            if not client_id or not refresh_token:
-                print("Missing client_id or refresh_token in mal_auth.json. Please run setup_auth.py.")
-                return False
-
-            data = {
-                "client_id": client_id,
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-            }
-
-            response = requests.post("https://myanimelist.net/v1/oauth2/token", data=data, timeout=10)
-
-            if response.status_code == 200:
-                token_data = response.json()
-                auth_data["access_token"] = token_data["access_token"]
-                auth_data["refresh_token"] = token_data["refresh_token"]
-
-                with open(self.mal_auth_path, "w", encoding="utf-8") as f:
-                    json.dump(auth_data, f, indent=4)
-
-                self.mal_access_token = token_data["access_token"]
-                print("MAL token refreshed successfully!")
-                return True
-            else:
-                print(f"Failed to refresh MAL token: {response.status_code} - {response.text}")
-                return False
-        except Exception as e:
-            print(f"Error during MAL token refresh: {e}")
+        auth_data = self._read_mal_auth()
+        if not auth_data:
             return False
 
+        client_id = auth_data.get("client_id")
+        refresh_token = auth_data.get("refresh_token")
+
+        if not client_id or not refresh_token:
+            print("Missing client_id or refresh_token in mal_auth.json. Please run setup_auth.py.")
+            return False
+
+        data = {
+            "client_id": client_id,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        }
+
+        try:
+            response = requests.post("https://myanimelist.net/v1/oauth2/token", data=data, timeout=10)
+        except Exception as e:
+            print(f"Error during MAL token refresh request: {e}")
+            return False
+
+        if response.status_code == 200:
+            token_data = response.json()
+            auth_data["access_token"] = token_data["access_token"]
+            auth_data["refresh_token"] = token_data["refresh_token"]
+
+            if not self._write_mal_auth(auth_data):
+                return False
+
+            self.mal_access_token = token_data["access_token"]
+            print("MAL token refreshed successfully!")
+            return True
+        print(f"Failed to refresh MAL token: {response.status_code} - {response.text}")
+        return False
+
     def _make_mal_api_request(
-        self, endpoint: str, method: str = "GET", data: dict[str, Any] | None = None, is_retry: bool = False
+        self, endpoint: str, method: str = "GET", data: dict[str, Any] | None = None, *, is_retry: bool = False
     ) -> dict[str, Any] | None:
         """Make REST request to MyAnimeList API v2."""
         if not self.mal_access_token:
@@ -517,31 +534,39 @@ class AniListUpdater:
         headers = {"Authorization": f"Bearer {self.mal_access_token}"}
         url = f"https://api.myanimelist.net/v2/{endpoint}"
 
-        try:
-            if method == "GET":
+        response = None
+        if method == "GET":
+            try:
                 response = requests.get(url, headers=headers, params=data, timeout=10)
-            elif method in {"PATCH", "POST", "PUT"}:
-                headers["Content-Type"] = "application/x-www-form-urlencoded"
+            except Exception as e:
+                print(f"MAL Request error (GET): {e}")
+        elif method in {"PATCH", "POST", "PUT"}:
+            headers["Content-Type"] = "application/x-www-form-urlencoded"
+            try:
                 response = requests.patch(url, headers=headers, data=data, timeout=10)
-            else:
-                print(f"Unsupported HTTP method: {method}")
+            except Exception as e:
+                print(f"MAL Request error (PATCH): {e}")
+        else:
+            print(f"Unsupported HTTP method: {method}")
+
+        if response is None:
+            return None
+
+        if response.status_code == 401 and not is_retry and self._refresh_mal_access_token():
+            return self._make_mal_api_request(endpoint, method, data, is_retry=True)
+
+        if response.status_code in {200, 201, 204}:
+            try:
+                return response.json() if response.text else {}
+            except Exception as e:
+                print(f"Error parsing MAL response JSON: {e}")
                 return None
 
-            if response.status_code == 401 and not is_retry:
-                if self._refresh_mal_access_token():
-                    return self._make_mal_api_request(endpoint, method, data, is_retry=True)
-
-            if response.status_code in {200, 201, 204}:
-                return response.json() if response.text else {}
-
-            print(f"MAL API request failed: {response.status_code} - {response.text}\nEndpoint: {endpoint}")
-            return None
-        except Exception as e:
-            print(f"MAL Request error: {e}")
-            return None
+        print(f"MAL API request failed: {response.status_code} - {response.text}\nEndpoint: {endpoint}")
+        return None
 
     def update_mal_entry(
-        self, mal_id: int | None, status: str | None, progress: int | None, is_rewatching: bool = False
+        self, mal_id: int | None, status: str | None, progress: int | None, *, is_rewatching: bool = False
     ) -> None:
         """Update episode progress and/or status on MyAnimeList."""
         if mal_id is None:
@@ -602,57 +627,82 @@ class AniListUpdater:
             print(f"Error reading Shikimori credentials: {e}")
             return None, None
 
+    def _read_shiki_auth(self) -> dict[str, Any] | None:
+        try:
+            if not os.path.exists(self.shiki_auth_path):
+                return None
+            with open(self.shiki_auth_path, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error reading Shikimori auth: {e}")
+            return None
+
+    def _write_shiki_auth(self, auth_data: dict[str, Any]) -> bool:
+        try:
+            with open(self.shiki_auth_path, "w", encoding="utf-8") as f:
+                json.dump(auth_data, f, indent=4)
+            return True
+        except Exception as e:
+            print(f"Error writing Shikimori auth: {e}")
+            return False
+
     def _refresh_shiki_access_token(self) -> bool:
         """Attempt to refresh the Shikimori access token."""
         print("Shikimori access token expired. Attempting to refresh...")
-        try:
-            if not os.path.exists(self.shiki_auth_path):
-                return False
-            with open(self.shiki_auth_path, encoding="utf-8") as f:
-                auth_data = json.load(f)
-
-            client_id = auth_data.get("client_id")
-            client_secret = auth_data.get("client_secret")
-            refresh_token = auth_data.get("refresh_token")
-
-            if not client_id or not client_secret or not refresh_token:
-                print("Missing client_id, client_secret, or refresh_token in shiki_auth.json. Please run setup_auth_shiki.py.")
-                return False
-
-            headers = {
-                "User-Agent": "mpv-anilist-updater",
-                "Content-Type": "application/x-www-form-urlencoded"
-            }
-            data = {
-                "grant_type": "refresh_token",
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "refresh_token": refresh_token,
-            }
-
-            response = requests.post("https://shikimori.io/oauth/token", headers=headers, data=data, timeout=10)
-
-            if response.status_code == 200:
-                token_data = response.json()
-                auth_data["access_token"] = token_data["access_token"]
-                auth_data["refresh_token"] = token_data["refresh_token"]
-
-                with open(self.shiki_auth_path, "w", encoding="utf-8") as f:
-                    json.dump(auth_data, f, indent=4)
-
-                self.shiki_access_token = token_data["access_token"]
-                print("Shikimori token refreshed successfully!")
-                return True
-            else:
-                print(f"Failed to refresh Shikimori token: {response.status_code} - {response.text}")
-                return False
-        except Exception as e:
-            print(f"Error during Shikimori token refresh: {e}")
+        auth_data = self._read_shiki_auth()
+        if not auth_data:
             return False
 
+        client_id = auth_data.get("client_id")
+        client_secret = auth_data.get("client_secret")
+        refresh_token = auth_data.get("refresh_token")
+
+        if not client_id or not client_secret or not refresh_token:
+            print(
+                "Missing client_id, client_secret, or refresh_token in shiki_auth.json. Please run setup_auth_shiki.py."
+            )
+            return False
+
+        headers = {
+            "User-Agent": "mpv-anilist-updater",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        data = {
+            "grant_type": "refresh_token",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+        }
+
+        try:
+            response = requests.post("https://shikimori.io/oauth/token", headers=headers, data=data, timeout=10)
+        except Exception as e:
+            print(f"Error during Shikimori token refresh request: {e}")
+            return False
+
+        if response.status_code == 200:
+            token_data = response.json()
+            auth_data["access_token"] = token_data["access_token"]
+            auth_data["refresh_token"] = token_data["refresh_token"]
+
+            if not self._write_shiki_auth(auth_data):
+                return False
+
+            self.shiki_access_token = token_data["access_token"]
+            print("Shikimori token refreshed successfully!")
+            return True
+        print(f"Failed to refresh Shikimori token: {response.status_code} - {response.text}")
+        return False
+
     def _make_shiki_api_request(
-        self, endpoint: str, method: str = "GET", json_data: dict[str, Any] | None = None, params: dict[str, Any] | None = None, is_retry: bool = False
-    ) -> Any:
+        self,
+        endpoint: str,
+        method: str = "GET",
+        json_data: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        *,
+        is_retry: bool = False,
+    ) -> Any:  # noqa: ANN401
         """Make REST request to Shikimori API."""
         if not self.shiki_access_token or not self.shiki_user_id:
             self.shiki_access_token, self.shiki_user_id = self._load_shiki_credentials()
@@ -662,33 +712,44 @@ class AniListUpdater:
         headers = {
             "Authorization": f"Bearer {self.shiki_access_token}",
             "User-Agent": "mpv-anilist-updater",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
         url = f"https://shikimori.io/api/{endpoint}"
 
-        try:
-            if method == "GET":
+        response = None
+        if method == "GET":
+            try:
                 response = requests.get(url, headers=headers, params=params, timeout=10)
-            elif method == "POST":
+            except Exception as e:
+                print(f"Shikimori Request error (GET): {e}")
+        elif method == "POST":
+            try:
                 response = requests.post(url, headers=headers, json=json_data, timeout=10)
-            elif method == "PATCH":
+            except Exception as e:
+                print(f"Shikimori Request error (POST): {e}")
+        elif method == "PATCH":
+            try:
                 response = requests.patch(url, headers=headers, json=json_data, timeout=10)
-            else:
-                print(f"Unsupported HTTP method: {method}")
+            except Exception as e:
+                print(f"Shikimori Request error (PATCH): {e}")
+        else:
+            print(f"Unsupported HTTP method: {method}")
+
+        if response is None:
+            return None
+
+        if response.status_code == 401 and not is_retry and self._refresh_shiki_access_token():
+            return self._make_shiki_api_request(endpoint, method, json_data, params, is_retry=True)
+
+        if response.status_code in {200, 201, 204}:
+            try:
+                return response.json() if response.text else {}
+            except Exception as e:
+                print(f"Error parsing Shikimori response JSON: {e}")
                 return None
 
-            if response.status_code == 401 and not is_retry:
-                if self._refresh_shiki_access_token():
-                    return self._make_shiki_api_request(endpoint, method, json_data, params, is_retry=True)
-
-            if response.status_code in {200, 201, 204}:
-                return response.json() if response.text else {}
-
-            print(f"Shikimori API request failed: {response.status_code} - {response.text}\nEndpoint: {endpoint}")
-            return None
-        except Exception as e:
-            print(f"Shikimori Request error: {e}")
-            return None
+        print(f"Shikimori API request failed: {response.status_code} - {response.text}\nEndpoint: {endpoint}")
+        return None
 
     def update_shiki_entry(
         self, mal_id: int | None, status: str | None, progress: int | None
@@ -717,10 +778,7 @@ class AniListUpdater:
                 "PAUSED": "on_hold",
                 "REPEATING": "rewatching",
             }
-            if status_upper in status_map:
-                shiki_status = status_map[status_upper]
-            else:
-                shiki_status = status
+            shiki_status = status_map.get(status_upper, status)
 
         # Step 1: Find existing user rate for this anime
         params = {
@@ -729,7 +787,7 @@ class AniListUpdater:
             "target_type": "Anime"
         }
         rates = self._make_shiki_api_request("v2/user_rates", method="GET", params=params)
-        
+
         rate_id = None
         current_rewatches = 0
         current_status = None
