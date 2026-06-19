@@ -176,6 +176,8 @@ DIRECTORIES = options.DIRECTORIES
 EXCLUDED_DIRECTORIES = options.EXCLUDED_DIRECTORIES
 UPDATE_PERCENTAGE = tonumber(options.UPDATE_PERCENTAGE) or 85
 
+local current_anime_info = nil
+
 local function path_starts_with_any(path, directories)
     local norm_path = normalize_path(path)
     for _, dir in ipairs(directories) do
@@ -205,9 +207,17 @@ local function parse_detected_info(result)
 end
 
 function callback(success, result, error)
+    local is_success = success and result and result.status == 0
+
+    -- Update progress locally
+    if is_success then
+        if current_anime_info and current_anime_info.episode then
+            current_anime_info.current_progress = current_anime_info.episode
+        end
+    end
 
     -- Don't show any messages only if the result is successful
-    if options.SILENT_MODE and result and result.status == 0 then return end
+    if options.SILENT_MODE and is_success then return end
     
     -- Can send multiple OSD messages to display
     local messages = {}
@@ -223,7 +233,7 @@ function callback(success, result, error)
     end
     
 
-    if success and result and result.status == 0 then
+    if is_success then
         if #messages == 0 then
             table.insert(messages, "Updated anime correctly.")
         end
@@ -294,8 +304,6 @@ local python_command = get_python_command()
 
 local isPaused = false
 local is_file_eligible = false
-local current_anime_info = nil
-
 local is_fetching = false
 
 local function fetch_anime_info(cb)
