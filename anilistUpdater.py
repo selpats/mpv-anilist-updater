@@ -566,9 +566,27 @@ class AniListUpdater:
         return None
 
     def update_mal_entry(
-        self, mal_id: int | None, status: str | None, progress: int | None, *, is_rewatching: bool = False
+        self,
+        mal_id: int | None,
+        status: str | None,
+        progress: int | None,
+        *,
+        is_rewatching: bool | None = None,
+        set_start_date: bool = False,
+        set_finish_date: bool = False,
+        increment_rewatch_count: bool = False,
     ) -> None:
-        """Update episode progress and/or status on MyAnimeList."""
+        """Update episode progress and/or status on MyAnimeList.
+
+        Args:
+            mal_id: MAL anime ID.
+            status: AniList watch status.
+            progress: Episode progress.
+            is_rewatching: Whether the user is rewatching.
+            set_start_date: Whether to set the start date to today.
+            set_finish_date: Whether to set the finish date to today.
+            increment_rewatch_count: Whether to fetch and increment num_times_rewatched.
+        """
         if mal_id is None:
             return
 
@@ -585,7 +603,7 @@ class AniListUpdater:
                 "COMPLETED": "completed",
                 "DROPPED": "dropped",
                 "PAUSED": "on_hold",
-                "REPEATING": "watching",
+                "REPEATING": "completed",
             }
             if status_upper in status_map:
                 mal_status = status_map[status_upper]
@@ -600,8 +618,22 @@ class AniListUpdater:
             update_data["num_watched_episodes"] = progress
         if mal_status:
             update_data["status"] = mal_status
-        if is_rewatching:
-            update_data["is_rewatching"] = True
+        if is_rewatching is not None:
+            update_data["is_rewatching"] = is_rewatching
+        if set_start_date:
+            from datetime import date
+            update_data["start_date"] = date.today().isoformat()
+        if set_finish_date:
+            from datetime import date
+            update_data["finish_date"] = date.today().isoformat()
+            
+        if increment_rewatch_count:
+            get_endpoint = f"anime/{mal_id}?fields=my_list_status"
+            get_response = self._make_mal_api_request(get_endpoint, method="GET")
+            if get_response and "my_list_status" in get_response:
+                current_rewatches = get_response["my_list_status"].get("num_times_rewatched", 0)
+                update_data["num_times_rewatched"] = current_rewatches + 1
+
         response = self._make_mal_api_request(endpoint, method="PATCH", data=update_data)
         if not response or "num_episodes_watched" not in response:
             print("Failed to update MAL entry.")
@@ -1286,7 +1318,13 @@ class AniListUpdater:
             if not self._save_media_list_entry(anime_id, initial_status, file_progress):
                 raise Exception(f"Failed to add '{anime_name}' to your list.")
 
-            self.update_mal_entry(mal_id, initial_status, file_progress)
+            self.update_mal_entry(
+                mal_id,
+                initial_status,
+                file_progress,
+                set_start_date=(initial_status == "CURRENT"),
+                set_finish_date=(initial_status == "COMPLETED"),
+            )
             self.update_shiki_entry(mal_id, initial_status, file_progress)
             osd_message(f'Added "{anime_name}" to your list with progress: {file_progress}')
 
@@ -1313,7 +1351,7 @@ class AniListUpdater:
             # Step 2: Set progress to 1
             response = self._save_media_list_entry(anime_id, None, 1)
 
-            self.update_mal_entry(mal_id, "watching", 1, is_rewatching=True)
+            self.update_mal_entry(mal_id, "REPEATING", 1, is_rewatching=True)
             self.update_shiki_entry(mal_id, "rewatching", 1)
             updated_progress = response["data"]["SaveMediaListEntry"]["progress"]
             osd_message(f'Updated "{anime_name}" to REPEATING with progress: {updated_progress}')
@@ -1356,7 +1394,20 @@ class AniListUpdater:
             mal_id,
             status_to_set,
             file_progress,
-            is_rewatching=(status_to_set == "REPEATING" or current_status == "REPEATING"),
+            is_rewatching=(True if status_to_set == "REPEATING" else (False if current_status == "REPEATING" and status_to_set == "COMPLETED" else None)),
+            set_start_date=(
+                status_to_set == "CURRENT"
+                and current_status != "CURRENT"
+                and current_status != "REPEATING"
+            ),
+            set_finish_date=(
+                status_to_set == "COMPLETED"
+                and current_status != "REPEATING"
+            ),
+            increment_rewatch_count=(
+                status_to_set == "COMPLETED"
+                and current_status == "REPEATING"
+            )
         )
         self.update_shiki_entry(mal_id, status_to_set, file_progress)
         updated_progress = response["data"]["SaveMediaListEntry"]["progress"]
@@ -1596,7 +1647,25 @@ class AniListUpdater:
         )
 
         if status_changed and mal_id:
-            self.update_mal_entry(mal_id, current_status, None)
+            self.update_mal_entry(
+                mal_id,
+                current_status,
+                None,
+                is_rewatching=(True if current_status == "REPEATING" else (False if status_before == "REPEATING" and current_status == "COMPLETED" else None)),
+                set_start_date=(
+                    current_status == "CURRENT"
+                    and status_before != "CURRENT"
+                    and status_before != "REPEATING"
+                ),
+                set_finish_date=(
+                    current_status == "COMPLETED"
+                    and status_before != "REPEATING"
+                ),
+                increment_rewatch_count=(
+                    current_status == "COMPLETED"
+                    and status_before == "REPEATING"
+                )
+            )
             self.update_shiki_entry(mal_id, current_status, None)
 
         changes = [
