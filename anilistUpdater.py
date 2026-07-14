@@ -619,7 +619,7 @@ class AniListUpdater:
         if mal_status:
             update_data["status"] = mal_status
         if is_rewatching is not None:
-            update_data["is_rewatching"] = is_rewatching
+            update_data["is_rewatching"] = "true" if is_rewatching else "false"
         if set_start_date:
             from datetime import date
             update_data["start_date"] = date.today().isoformat()
