@@ -177,6 +177,7 @@ EXCLUDED_DIRECTORIES = options.EXCLUDED_DIRECTORIES
 UPDATE_PERCENTAGE = tonumber(options.UPDATE_PERCENTAGE) or 85
 
 local current_anime_info = nil
+local get_path
 
 local function path_starts_with_any(path, directories)
     local norm_path = normalize_path(path)
@@ -209,22 +210,29 @@ end
 function callback(success, result, error)
     local is_success = success and result and result.status == 0
 
-    -- Update progress locally
-    if is_success then
-        if current_anime_info and current_anime_info.episode then
-            current_anime_info.current_progress = current_anime_info.episode
-        end
-    end
+    -- removed eager local progress update
 
     -- Don't show any messages only if the result is successful
     if options.SILENT_MODE and is_success then return end
     
-    -- Can send multiple OSD messages to display
     local messages = {}
+    local prompt_rewatch_name = nil
+    local prompt_score_name = nil
+    local score_format = nil
+    local current_score = nil
+
     if result and result.stdout then
         for line in result.stdout:gmatch("[^\r\n]+") do
             local msg = line:match("^OSD:%s*(.-)%s*$")
-            if msg then
+            local rw_name = line:match("^PROMPT_REWATCH:%s*(.-)%s*$")
+            local s_name, s_format, s_curr = line:match("^PROMPT_SCORE:(.-):(.-):(.-)$")
+            if s_name then
+                prompt_score_name = s_name
+                score_format = s_format
+                current_score = s_curr
+            elseif rw_name then
+                prompt_rewatch_name = rw_name
+            elseif msg then
                 table.insert(messages, msg)
             else
                 print(line)
@@ -232,6 +240,140 @@ function callback(success, result, error)
         end
     end
     
+    if prompt_rewatch_name then
+        mp.osd_message('Rewatch "' .. prompt_rewatch_name .. '"? (ENTER: yes, ESC: no)', 10)
+        local function accept_rewatch()
+            mp.osd_message("Setting to REPEATING...", 3)
+            mp.remove_key_binding("accept_rewatch")
+            mp.remove_key_binding("cancel_rewatch")
+            local path = get_path()
+            local info_json = utils.format_json(current_anime_info)
+            mp.command_native_async({
+                name = "subprocess",
+                args = {python_command, script_dir .. "anilistUpdater.py", path, "set_rewatching", python_options_json, info_json},
+                capture_stdout = true
+            }, callback)
+        end
+        local function cancel_rewatch()
+            mp.osd_message("Cancelled rewatch.", 3)
+            mp.remove_key_binding("accept_rewatch")
+            mp.remove_key_binding("cancel_rewatch")
+        end
+        mp.add_forced_key_binding("ENTER", "accept_rewatch", accept_rewatch)
+        mp.add_forced_key_binding("ESC", "cancel_rewatch", cancel_rewatch)
+        return
+    end
+
+    if prompt_score_name then
+        local input_score = ""
+        local prompt_timer = nil
+
+        local function render_prompt()
+            local has_score = current_score and current_score ~= "None" and current_score ~= ""
+            local curr = has_score and (" (Current: " .. current_score .. ")") or ""
+            local esc_msg = has_score and "(ESC to not change)" or "(ESC to skip)"
+            local format_desc = score_format
+            if score_format == "POINT_100" then format_desc = "1-100"
+            elseif score_format == "POINT_10_DECIMAL" then format_desc = "1.0-10.0"
+            elseif score_format == "POINT_10" then format_desc = "1-10"
+            elseif score_format == "POINT_5" then format_desc = "1-5"
+            elseif score_format == "POINT_3" then format_desc = "1-3" end
+            
+            local msg = 'Finished "' .. prompt_score_name .. '"' .. curr .. '\nRate (' .. format_desc .. '): ' .. input_score .. '_\nENTER to submit, ' .. esc_msg
+            mp.osd_message(msg, 1)
+        end
+
+        prompt_timer = mp.add_periodic_timer(0.25, render_prompt)
+
+        local function cleanup_bindings()
+            if prompt_timer then
+                prompt_timer:kill()
+                prompt_timer = nil
+            end
+            mp.osd_message("", 0)
+            mp.remove_key_binding("score_enter")
+            mp.remove_key_binding("score_esc")
+            mp.remove_key_binding("score_bs")
+            for i = 0, 9 do
+                mp.remove_key_binding("score_" .. i)
+                mp.remove_key_binding("score_kp" .. i)
+            end
+            mp.remove_key_binding("score_dot")
+            mp.remove_key_binding("score_kp_dot")
+            mp.remove_key_binding("score_comma")
+        end
+
+        local function submit_score()
+            cleanup_bindings()
+            local safe_path = get_path() or ""
+            local safe_info = current_anime_info and utils.format_json(current_anime_info) or "{}"
+            local safe_opts = python_options_json or "{}"
+            local safe_cmd = python_command or "python"
+            local sanitized_score = input_score:gsub(",", ".")
+
+            if sanitized_score == "" then
+                mp.osd_message("Setting to COMPLETED without score...", 3)
+                mp.command_native_async({
+                    name = "subprocess",
+                    args = {safe_cmd, script_dir .. "anilistUpdater.py", safe_path, "set_completed_no_score", safe_opts, safe_info},
+                    capture_stdout = true
+                }, callback)
+            else
+                mp.osd_message("Setting to COMPLETED with score " .. sanitized_score .. "...", 3)
+                mp.command_native_async({
+                    name = "subprocess",
+                    args = {safe_cmd, script_dir .. "anilistUpdater.py", safe_path, "set_completed_with_score", safe_opts, safe_info, sanitized_score},
+                    capture_stdout = true
+                }, callback)
+            end
+        end
+
+        local function cancel_score()
+            cleanup_bindings()
+            local has_score = current_score and current_score ~= "None" and current_score ~= ""
+            if has_score then
+                mp.osd_message("Kept current score. Setting to COMPLETED...", 3)
+            else
+                mp.osd_message("Skipped rating. Setting to COMPLETED...", 3)
+            end
+            local safe_path = get_path() or ""
+            local safe_info = current_anime_info and utils.format_json(current_anime_info) or "{}"
+            local safe_opts = python_options_json or "{}"
+            local safe_cmd = python_command or "python"
+            
+            mp.command_native_async({
+                name = "subprocess",
+                args = {safe_cmd, script_dir .. "anilistUpdater.py", safe_path, "set_completed_no_score", safe_opts, safe_info},
+                capture_stdout = true
+            }, callback)
+        end
+
+        local function add_char(c)
+            input_score = input_score .. c
+            render_prompt()
+        end
+
+        local function backspace()
+            if #input_score > 0 then
+                input_score = input_score:sub(1, -2)
+                render_prompt()
+            end
+        end
+
+        mp.add_forced_key_binding("ENTER", "score_enter", submit_score)
+        mp.add_forced_key_binding("ESC", "score_esc", cancel_score)
+        mp.add_forced_key_binding("BS", "score_bs", backspace)
+        for i = 0, 9 do
+            mp.add_forced_key_binding(tostring(i), "score_" .. i, function() add_char(tostring(i)) end)
+            mp.add_forced_key_binding("KP" .. tostring(i), "score_kp" .. i, function() add_char(tostring(i)) end)
+        end
+        mp.add_forced_key_binding(".", "score_dot", function() add_char(".") end)
+        mp.add_forced_key_binding("KP_DEC", "score_kp_dot", function() add_char(".") end)
+        mp.add_forced_key_binding(",", "score_comma", function() add_char(",") end)
+
+        render_prompt()
+        return
+    end
 
     if is_success then
         if #messages == 0 then
@@ -277,7 +419,7 @@ local function is_ani_cli_compatible()
     return full_path:match("https?://") ~= nil
 end
 
-local function get_path()
+get_path = function()
     local directory = mp.get_property("working-directory")
     -- It seems like in Linux working-directory sometimes returns it without a "/" at the end
     directory = (directory:sub(-1) == '/' or directory:sub(-1) == '\\') and directory or directory .. '/'

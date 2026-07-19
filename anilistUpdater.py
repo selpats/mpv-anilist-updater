@@ -59,11 +59,12 @@ class AnimeInfo:
     file_progress: int | None
     current_status: str | None
     mal_id: int | None = None
+    current_score: float | None = None
 
     # Can not specify the type further. Causes some of the the variables type checking to be unhappy.
     def __iter__(self) -> Iterator[Any]:  # fmt: off
         """Allow tuple unpacking of AnimeInfo."""
-        return iter((self.anime_id, self.anime_name, self.current_progress, self.total_episodes, self.file_progress, self.current_status, self.mal_id))  # fmt: off
+        return iter((self.anime_id, self.anime_name, self.current_progress, self.total_episodes, self.file_progress, self.current_status, self.mal_id, self.current_score))  # fmt: off
 
 
 @dataclass
@@ -106,6 +107,7 @@ class AniListQueries:
                     mediaListEntry {
                         status
                         progress
+                        score
                         media {
                             episodes
                         }
@@ -140,6 +142,7 @@ class AniListQueries:
                     mediaListEntry {
                         status
                         progress
+                        score
                         media {
                             episodes
                         }
@@ -162,14 +165,15 @@ class AniListQueries:
     """
 
     # Mutation to save/update media list entry (works for both adding and updating)
-    # Variables: mediaId (Int), progress (Int), status (MediaListStatus)
+    # Variables: mediaId (Int), progress (Int), status (MediaListStatus), score (Float)
     SAVE_MEDIA_LIST_ENTRY = """
-        mutation ($mediaId: Int, $progress: Int, $status: MediaListStatus) {
-            SaveMediaListEntry (mediaId: $mediaId, progress: $progress, status: $status) {
+        mutation ($mediaId: Int, $progress: Int, $status: MediaListStatus, $score: Float) {
+            SaveMediaListEntry (mediaId: $mediaId, progress: $progress, status: $status, score: $score) {
                 status
                 id
                 progress
                 mediaId
+                score
             }
         }
     """
@@ -300,7 +304,7 @@ class AniListUpdater:
         existing_entry = cache.get(dir_hash, {})
         is_corrected = bool(existing_entry.get("corrected", False))
 
-        anime_id, _, current_progress, total_episodes, relative_progress, current_status, mal_id = result
+        anime_id, _, current_progress, total_episodes, relative_progress, current_status, mal_id, current_score = result
 
         now = time.time()
         ttl_refresh_rate = self.CORRECTED_CACHE_REFRESH_RATE if is_corrected else self.CACHE_REFRESH_RATE
@@ -336,7 +340,7 @@ class AniListUpdater:
 
         # Purge expired
         for k, v in list(cache.items()):
-            if v.get("ttl", 0) < now:
+            if isinstance(v, dict) and v.get("ttl", 0) < now:
                 cache.pop(k, None)
                 changed = True
 
@@ -406,6 +410,27 @@ class AniListUpdater:
     # ──────────────────────────────────────────────────────────────────────────────────────────────────
     # API COMMUNICATION
     # ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+    def get_score_format(self) -> str:
+        """Fetch the user's score format and cache it."""
+        cache = self.load_cache()
+        if "__score_format__" in cache:
+            return cache["__score_format__"]
+
+        query = """
+            query {
+                Viewer {
+                    mediaListOptions {
+                        scoreFormat
+                    }
+                }
+            }
+        """
+        response = self._make_api_request(query, {}, self.access_token)
+        score_format = response["data"]["Viewer"]["mediaListOptions"]["scoreFormat"]
+        cache["__score_format__"] = score_format
+        self.save_cache(cache)
+        return score_format
 
     # Function to make an api request to AniList's api
     def _make_api_request(
@@ -575,6 +600,7 @@ class AniListUpdater:
         set_start_date: bool = False,
         set_finish_date: bool = False,
         increment_rewatch_count: bool = False,
+        score: int | None = None,
     ) -> None:
         """Update episode progress and/or status on MyAnimeList.
 
@@ -586,6 +612,7 @@ class AniListUpdater:
             set_start_date: Whether to set the start date to today.
             set_finish_date: Whether to set the finish date to today.
             increment_rewatch_count: Whether to fetch and increment num_times_rewatched.
+            score: The score to set on a 10-point scale.
         """
         if mal_id is None:
             return
@@ -626,6 +653,8 @@ class AniListUpdater:
         if set_finish_date:
             from datetime import date
             update_data["finish_date"] = date.today().isoformat()
+        if score is not None and score > 0:
+            update_data["score"] = score
             
         if increment_rewatch_count:
             get_endpoint = f"anime/{mal_id}?fields=my_list_status"
@@ -784,9 +813,9 @@ class AniListUpdater:
         return None
 
     def update_shiki_entry(
-        self, mal_id: int | None, status: str | None, progress: int | None
+        self, mal_id: int | None, status: str | None, progress: int | None, score: int | None = None
     ) -> None:
-        """Update episode progress and/or status on Shikimori."""
+        """Update episode progress, status and score on Shikimori."""
         if mal_id is None:
             return
 
@@ -845,6 +874,8 @@ class AniListUpdater:
                 user_rate_data["status"] = shiki_status
             if rewatches_to_set is not None:
                 user_rate_data["rewatches"] = rewatches_to_set
+            if score is not None and score > 0:
+                user_rate_data["score"] = score
 
             payload = {"user_rate": user_rate_data}
             response = self._make_shiki_api_request(endpoint, method="PATCH", json_data=payload)
@@ -859,6 +890,8 @@ class AniListUpdater:
                 user_rate_data["episodes"] = progress
             if shiki_status:
                 user_rate_data["status"] = shiki_status
+            if score is not None and score > 0:
+                user_rate_data["score"] = score
 
             payload = {"user_rate": user_rate_data}
             response = self._make_shiki_api_request(endpoint, method="POST", json_data=payload)
@@ -1234,6 +1267,7 @@ class AniListUpdater:
             file_progress,
             entry["status"] if entry is not None else None,
             seasons[0]["idMal"],
+            entry["score"] if entry is not None else None,
         )
 
         is_absolute_numbering = seasons and seasons[0]["episodes"] and file_progress > seasons[0]["episodes"]
@@ -1272,6 +1306,7 @@ class AniListUpdater:
                 season_episode_info.relative_episode,
                 found_entry["status"] if found_entry else None,
                 found_season.get("idMal") if found_season else None,
+                found_entry["score"] if found_entry else None,
             )
             print(f"Final guessed anime: {anime_data.anime_name}")
             print(f"Absolute episode {file_progress} corresponds to episode: {anime_data.file_progress}")
@@ -1296,7 +1331,7 @@ class AniListUpdater:
         if result is None:
             raise Exception("Parameter in update_episode_count is null.")
 
-        anime_id, anime_name, current_progress, total_episodes, file_progress, current_status, mal_id = result
+        anime_id, anime_name, current_progress, total_episodes, file_progress, current_status, mal_id, current_score = result
 
         if anime_id is None:
             raise Exception("Couldn't find that anime! Make sure it is on your list and the title is correct.")
@@ -1329,7 +1364,7 @@ class AniListUpdater:
             osd_message(f'Added "{anime_name}" to your list with progress: {file_progress}')
 
             return AnimeInfo(
-                anime_id, anime_name, file_progress, total_episodes, file_progress, initial_status, mal_id
+                anime_id, anime_name, file_progress, total_episodes, file_progress, initial_status, mal_id, current_score
             )
 
         should_set_to_rewatching = (
@@ -1340,6 +1375,11 @@ class AniListUpdater:
 
         # Handle completed -> rewatching on first episode
         if should_set_to_rewatching:
+            action = getattr(self, "_current_action", "update_with_info")
+            if action != "set_rewatching":
+                print(f"PROMPT_REWATCH:{anime_name}")
+                return AnimeInfo(anime_id, anime_name, current_progress, total_episodes, 1, "COMPLETED", mal_id)
+
             # Needs to update in 2 steps, since AniList
             # doesn't allow setting progress while changing the status from completed to rewatching.
             # If you try, it will just reset the progress to 0.
@@ -1356,7 +1396,7 @@ class AniListUpdater:
             updated_progress = response["data"]["SaveMediaListEntry"]["progress"]
             osd_message(f'Updated "{anime_name}" to REPEATING with progress: {updated_progress}')
 
-            return AnimeInfo(anime_id, anime_name, updated_progress, total_episodes, 1, "REPEATING", mal_id)
+            return AnimeInfo(anime_id, anime_name, updated_progress, total_episodes, 1, "REPEATING", mal_id, current_score)
 
         rewatching_and_updating = current_status == "REPEATING" and self.options["UPDATE_PROGRESS_WHEN_REWATCHING"]
         in_modifiable_state = current_status in {"CURRENT", "PLANNING", "PAUSED"}
@@ -1383,12 +1423,36 @@ class AniListUpdater:
         )
 
         if should_set_to_completed:
+            action = getattr(self, "_current_action", "update_with_info")
+            if action not in {"set_completed_with_score", "set_completed_no_score"}:
+                score_format = self.get_score_format()
+                score_str = str(current_score) if current_score is not None else ""
+                print(f"PROMPT_SCORE:{anime_name}:{score_format}:{score_str}")
+                return AnimeInfo(anime_id, anime_name, current_progress, total_episodes, file_progress, current_status, mal_id, current_score)
+
             status_to_set = "COMPLETED"
 
         if status_to_set:
-            response = self._save_media_list_entry(anime_id, status_to_set, file_progress)
+            score_to_set = getattr(self, "_score_to_set", None)
+            response = self._save_media_list_entry(anime_id, status_to_set, file_progress, score=score_to_set)
         else:
             response = self._save_media_list_entry(anime_id, None, file_progress)
+
+        mal_score = None
+        if getattr(self, "_score_to_set", None) is not None:
+            try:
+                score_format = self.get_score_format()
+                score_val = getattr(self, "_score_to_set")
+                if score_format == "POINT_100":
+                    mal_score = int(round(score_val / 10))
+                elif score_format in {"POINT_10", "POINT_10_DECIMAL"}:
+                    mal_score = int(round(score_val))
+                elif score_format == "POINT_5":
+                    mal_score = int(score_val * 2)
+                elif score_format == "POINT_3":
+                    mal_score = {1: 4, 2: 6, 3: 8}.get(int(score_val), 0)
+            except Exception:
+                pass
 
         self.update_mal_entry(
             mal_id,
@@ -1407,18 +1471,19 @@ class AniListUpdater:
             increment_rewatch_count=(
                 status_to_set == "COMPLETED"
                 and current_status == "REPEATING"
-            )
+            ),
+            score=mal_score,
         )
-        self.update_shiki_entry(mal_id, status_to_set, file_progress)
+        self.update_shiki_entry(mal_id, status_to_set, file_progress, score=mal_score)
         updated_progress = response["data"]["SaveMediaListEntry"]["progress"]
         updated_status = response["data"]["SaveMediaListEntry"]["status"]
         osd_message(f'Updated "{anime_name}" to: {updated_progress}')
 
         return AnimeInfo(
-            anime_id, anime_name, updated_progress, total_episodes, file_progress, updated_status, mal_id
+            anime_id, anime_name, updated_progress, total_episodes, file_progress, updated_status, mal_id, current_score
         )
 
-    def _save_media_list_entry(self, anime_id: int, status: str | None, progress: int | None) -> dict[str, Any]:
+    def _save_media_list_entry(self, anime_id: int, status: str | None, progress: int | None, score: float | None = None) -> dict[str, Any]:
         """
         Helper function to save media list entry.
 
@@ -1440,9 +1505,11 @@ class AniListUpdater:
             variables["status"] = status
         if progress is not None:
             variables["progress"] = progress
+        if score is not None:
+            variables["score"] = score
 
-        if "status" not in variables and "progress" not in variables:
-            raise ValueError("At least one of status or progress must be provided.")
+        if "status" not in variables and "progress" not in variables and "score" not in variables:
+            raise ValueError("At least one of status, progress, or score must be provided.")
 
         return self._make_api_request(query, variables, self.access_token)
 
@@ -1503,6 +1570,7 @@ class AniListUpdater:
             file_progress=anime_info.get("episode"),
             current_status=anime_info.get("current_status"),
             mal_id=anime_info.get("mal_id"),
+            current_score=anime_info.get("current_score"),
         )
 
         result = self.update_episode_count(result)
@@ -1731,8 +1799,14 @@ def run_action(updater: AniListUpdater) -> None:
     """Execute the appropriate updater action based on command line arguments."""
     action = sys.argv[2]
     filepath = sys.argv[1]
-    if action == "update_with_info" and len(sys.argv) > 4:
+    updater._current_action = action
+    if action in {"update_with_info", "set_rewatching"} and len(sys.argv) > 4:
         anime_info_json = json.loads(sys.argv[4])
+        updater.update_with_preloaded_info(filepath, anime_info_json)
+    elif action in {"set_completed_with_score", "set_completed_no_score"} and len(sys.argv) > 4:
+        anime_info_json = json.loads(sys.argv[4])
+        if action == "set_completed_with_score" and len(sys.argv) > 5:
+            updater._score_to_set = float(sys.argv[5])
         updater.update_with_preloaded_info(filepath, anime_info_json)
     elif action == "correct":
         # Pre-fetched anime info JSON is always the last argument
