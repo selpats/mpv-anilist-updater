@@ -165,10 +165,10 @@ class AniListQueries:
     """
 
     # Mutation to save/update media list entry (works for both adding and updating)
-    # Variables: mediaId (Int), progress (Int), status (MediaListStatus), score (Float)
+    # Variables: mediaId (Int), progress (Int), status (MediaListStatus), score (Float), startedAt (FuzzyDateInput), completedAt (FuzzyDateInput)
     SAVE_MEDIA_LIST_ENTRY = """
-        mutation ($mediaId: Int, $progress: Int, $status: MediaListStatus, $score: Float) {
-            SaveMediaListEntry (mediaId: $mediaId, progress: $progress, status: $status, score: $score) {
+        mutation ($mediaId: Int, $progress: Int, $status: MediaListStatus, $score: Float, $startedAt: FuzzyDateInput, $completedAt: FuzzyDateInput) {
+            SaveMediaListEntry (mediaId: $mediaId, progress: $progress, status: $status, score: $score, startedAt: $startedAt, completedAt: $completedAt) {
                 status
                 id
                 progress
@@ -1350,7 +1350,13 @@ class AniListUpdater:
             if is_last_episode and self.options.get("SET_TO_COMPLETED_AFTER_LAST_EPISODE_CURRENT", False):
                 initial_status = "COMPLETED"
 
-            if not self._save_media_list_entry(anime_id, initial_status, file_progress):
+            if not self._save_media_list_entry(
+                anime_id, 
+                initial_status, 
+                file_progress,
+                set_start_date=(initial_status == "CURRENT"),
+                set_finish_date=(initial_status == "COMPLETED")
+            ):
                 raise Exception(f"Failed to add '{anime_name}' to your list.")
 
             self.update_mal_entry(
@@ -1434,7 +1440,21 @@ class AniListUpdater:
 
         if status_to_set:
             score_to_set = getattr(self, "_score_to_set", None)
-            response = self._save_media_list_entry(anime_id, status_to_set, file_progress, score=score_to_set)
+            response = self._save_media_list_entry(
+                anime_id,
+                status_to_set,
+                file_progress,
+                score=score_to_set,
+                set_start_date=(
+                    status_to_set == "CURRENT"
+                    and current_status != "CURRENT"
+                    and current_status != "REPEATING"
+                ),
+                set_finish_date=(
+                    status_to_set == "COMPLETED"
+                    and current_status != "REPEATING"
+                ),
+            )
         else:
             response = self._save_media_list_entry(anime_id, None, file_progress)
 
@@ -1483,7 +1503,15 @@ class AniListUpdater:
             anime_id, anime_name, updated_progress, total_episodes, file_progress, updated_status, mal_id, current_score
         )
 
-    def _save_media_list_entry(self, anime_id: int, status: str | None, progress: int | None, score: float | None = None) -> dict[str, Any]:
+    def _save_media_list_entry(
+        self,
+        anime_id: int,
+        status: str | None,
+        progress: int | None,
+        score: float | None = None,
+        set_start_date: bool = False,
+        set_finish_date: bool = False,
+    ) -> dict[str, Any]:
         """
         Helper function to save media list entry.
 
@@ -1491,6 +1519,9 @@ class AniListUpdater:
             anime_id (int): AniList anime ID.
             status (str | None): Status to set.
             progress (int | None): Progress to set.
+            score (float | None): Optional score to set.
+            set_start_date (bool): Whether to explicitly set the start date to today.
+            set_finish_date (bool): Whether to explicitly set the finish date to today.
 
         Returns:
             dict[str, Any]: API response.
@@ -1507,6 +1538,15 @@ class AniListUpdater:
             variables["progress"] = progress
         if score is not None:
             variables["score"] = score
+            
+        if set_start_date:
+            from datetime import date
+            today = date.today()
+            variables["startedAt"] = {"year": today.year, "month": today.month, "day": today.day}
+        if set_finish_date:
+            from datetime import date
+            today = date.today()
+            variables["completedAt"] = {"year": today.year, "month": today.month, "day": today.day}
 
         if "status" not in variables and "progress" not in variables and "score" not in variables:
             raise ValueError("At least one of status, progress, or score must be provided.")
