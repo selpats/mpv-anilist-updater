@@ -207,10 +207,15 @@ local function parse_detected_info(result)
     return nil
 end
 
-function callback(success, result, error)
+function callback(success, result, error, is_info_check)
     local is_success = success and result and result.status == 0
 
-    -- removed eager local progress update
+    if is_success then
+        local new_info = parse_detected_info(result)
+        if new_info then
+            current_anime_info = new_info
+        end
+    end
 
     -- Don't show any messages only if the result is successful
     if options.SILENT_MODE and is_success then return end
@@ -218,6 +223,7 @@ function callback(success, result, error)
     local messages = {}
     local prompt_rewatch_name = nil
     local prompt_score_name = nil
+    local prompt_planning_name = nil
     local score_format = nil
     local current_score = nil
 
@@ -225,6 +231,7 @@ function callback(success, result, error)
         for line in result.stdout:gmatch("[^\r\n]+") do
             local msg = line:match("^OSD:%s*(.-)%s*$")
             local rw_name = line:match("^PROMPT_REWATCH:%s*(.-)%s*$")
+            local pl_name = line:match("^PROMPT_ADD_PLANNING:%s*(.-)%s*$")
             local s_name, s_format, s_curr = line:match("^PROMPT_SCORE:(.-):(.-):(.-)$")
             if s_name then
                 prompt_score_name = s_name
@@ -232,6 +239,8 @@ function callback(success, result, error)
                 current_score = s_curr
             elseif rw_name then
                 prompt_rewatch_name = rw_name
+            elseif pl_name then
+                prompt_planning_name = pl_name
             elseif msg then
                 table.insert(messages, msg)
             else
@@ -240,6 +249,30 @@ function callback(success, result, error)
         end
     end
     
+    if prompt_planning_name then
+        mp.osd_message('Add "' .. prompt_planning_name .. '" to Plan to Watch? (ENTER: yes, ESC: no)', 10)
+        local function accept_planning()
+            mp.osd_message("Adding to Plan to Watch...", 3)
+            mp.remove_key_binding("accept_planning")
+            mp.remove_key_binding("cancel_planning")
+            local path = get_path()
+            local info_json = utils.format_json(current_anime_info)
+            mp.command_native_async({
+                name = "subprocess",
+                args = {python_command, script_dir .. "anilistUpdater.py", path, "set_planning", python_options_json, info_json},
+                capture_stdout = true
+            }, callback)
+        end
+        local function cancel_planning()
+            mp.osd_message("Cancelled adding to Plan to Watch.", 3)
+            mp.remove_key_binding("accept_planning")
+            mp.remove_key_binding("cancel_planning")
+        end
+        mp.add_forced_key_binding("ENTER", "accept_planning", accept_planning)
+        mp.add_forced_key_binding("ESC", "cancel_planning", cancel_planning)
+        return
+    end
+
     if prompt_rewatch_name then
         mp.osd_message('Rewatch "' .. prompt_rewatch_name .. '"? (ENTER: yes, ESC: no)', 10)
         local function accept_rewatch()
@@ -375,7 +408,7 @@ function callback(success, result, error)
         return
     end
 
-    if is_success then
+    if is_success and not is_info_check then
         if #messages == 0 then
             table.insert(messages, "Updated anime correctly.")
         end
@@ -466,6 +499,7 @@ local function fetch_anime_info(cb)
             if current_anime_info then
                 print("Detected anime: " .. (current_anime_info.anime_name or "?") .. " #" .. (current_anime_info.episode or "?"))
             end
+            callback(success, result, nil, true)
         end
         if cb then
             cb(current_anime_info)

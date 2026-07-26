@@ -1003,6 +1003,8 @@ class AniListUpdater:
                 "absolute_episode": file_info.episode,
             }
             print(f"INFO:{json.dumps(payload)}")
+            if not self.options.get("ADD_ENTRY_IF_MISSING", False) and result.current_status is None and (result.file_progress == 1 or file_info.episode == 1):
+                print(f"PROMPT_ADD_PLANNING:{result.anime_name}")
             if result.current_progress is not None:
                 self.cache_to_file(filename, file_info.name, file_info.episode, result)
 
@@ -1623,6 +1625,60 @@ class AniListUpdater:
                 result,
             )
 
+    def set_planning(self, filepath: str, anime_info: dict[str, Any]) -> None:
+        """
+        Add anime to user list with status PLANNING and progress 0.
+
+        Args:
+            filepath (str): Path to the currently playing file.
+            anime_info (dict[str, Any]): Pre-fetched anime info from the 'info' action.
+        """
+        anime_id = anime_info.get("anime_id")
+        anime_name = anime_info.get("anime_name")
+        mal_id = anime_info.get("mal_id")
+        total_episodes = anime_info.get("total_episodes")
+        file_progress = anime_info.get("episode")
+
+        if anime_id is None:
+            raise Exception("Couldn't find that anime!")
+
+        print(f'Adding "{anime_name}" to your list as PLANNING...')
+        if not self._save_media_list_entry(anime_id, "PLANNING", 0):
+            raise Exception(f"Failed to add '{anime_name}' to your list.")
+
+        self.update_mal_entry(mal_id, "PLANNING", 0)
+        self.update_shiki_entry(mal_id, "PLANNING", 0)
+        osd_message(f'Added "{anime_name}" to Plan to Watch!')
+
+        result = AnimeInfo(
+            anime_id=anime_id,
+            anime_name=anime_name,
+            current_progress=0,
+            total_episodes=total_episodes,
+            file_progress=file_progress,
+            current_status="PLANNING",
+            mal_id=mal_id,
+            current_score=None,
+        )
+        self.cache_to_file(
+            filepath,
+            anime_info["guessed_name"],
+            anime_info["absolute_episode"],
+            result,
+        )
+        payload = {
+            "anime_id": anime_id,
+            "mal_id": mal_id,
+            "anime_name": anime_name,
+            "episode": file_progress,
+            "current_progress": 0,
+            "total_episodes": total_episodes,
+            "current_status": "PLANNING",
+            "guessed_name": anime_info["guessed_name"],
+            "absolute_episode": anime_info["absolute_episode"],
+        }
+        print(f"INFO:{json.dumps(payload)}")
+
     def _correct_anime_id_change(
         self,
         anilist_id: int,
@@ -1840,7 +1896,10 @@ def run_action(updater: AniListUpdater) -> None:
     action = sys.argv[2]
     filepath = sys.argv[1]
     updater._current_action = action
-    if action in {"update_with_info", "set_rewatching"} and len(sys.argv) > 4:
+    if action == "set_planning" and len(sys.argv) > 4:
+        anime_info_json = json.loads(sys.argv[4])
+        updater.set_planning(filepath, anime_info_json)
+    elif action in {"update_with_info", "set_rewatching"} and len(sys.argv) > 4:
         anime_info_json = json.loads(sys.argv[4])
         updater.update_with_preloaded_info(filepath, anime_info_json)
     elif action in {"set_completed_with_score", "set_completed_no_score"} and len(sys.argv) > 4:
