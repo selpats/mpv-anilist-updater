@@ -250,23 +250,38 @@ function callback(success, result, error, is_info_check)
     end
     
     if prompt_planning_name then
-        mp.osd_message('Add "' .. prompt_planning_name .. '" to Plan to Watch? (ENTER: yes, ESC: no)', 10)
-        local function accept_planning()
-            mp.osd_message("Adding to Plan to Watch...", 3)
+        local prompt_timer = nil
+        local function render_planning_prompt()
+            mp.osd_message('Add "' .. prompt_planning_name .. '" to Plan to Watch? (ENTER: yes, ESC: no)', 1)
+        end
+        prompt_timer = mp.add_periodic_timer(0.25, render_planning_prompt)
+
+        local function cleanup_planning()
+            if prompt_timer then
+                prompt_timer:kill()
+                prompt_timer = nil
+            end
+            mp.osd_message("", 0)
             mp.remove_key_binding("accept_planning")
             mp.remove_key_binding("cancel_planning")
-            local path = get_path()
-            local info_json = utils.format_json(current_anime_info)
+        end
+
+        local function accept_planning()
+            cleanup_planning()
+            mp.osd_message("Adding to Plan to Watch...", 3)
+            local safe_path = get_path() or ""
+            local safe_info = current_anime_info and utils.format_json(current_anime_info) or "{}"
+            local safe_opts = python_options_json or "{}"
+            local safe_cmd = python_command or "python"
             mp.command_native_async({
                 name = "subprocess",
-                args = {python_command, script_dir .. "anilistUpdater.py", path, "set_planning", python_options_json, info_json},
+                args = {safe_cmd, script_dir .. "anilistUpdater.py", safe_path, "set_planning", safe_opts, safe_info},
                 capture_stdout = true
             }, callback)
         end
         local function cancel_planning()
+            cleanup_planning()
             mp.osd_message("Cancelled adding to Plan to Watch.", 3)
-            mp.remove_key_binding("accept_planning")
-            mp.remove_key_binding("cancel_planning")
         end
         mp.add_forced_key_binding("ENTER", "accept_planning", accept_planning)
         mp.add_forced_key_binding("ESC", "cancel_planning", cancel_planning)
@@ -274,23 +289,38 @@ function callback(success, result, error, is_info_check)
     end
 
     if prompt_rewatch_name then
-        mp.osd_message('Rewatch "' .. prompt_rewatch_name .. '"? (ENTER: yes, ESC: no)', 10)
-        local function accept_rewatch()
-            mp.osd_message("Setting to REPEATING...", 3)
+        local prompt_timer = nil
+        local function render_rewatch_prompt()
+            mp.osd_message('Rewatch "' .. prompt_rewatch_name .. '"? (ENTER: yes, ESC: no)', 1)
+        end
+        prompt_timer = mp.add_periodic_timer(0.25, render_rewatch_prompt)
+
+        local function cleanup_rewatch()
+            if prompt_timer then
+                prompt_timer:kill()
+                prompt_timer = nil
+            end
+            mp.osd_message("", 0)
             mp.remove_key_binding("accept_rewatch")
             mp.remove_key_binding("cancel_rewatch")
-            local path = get_path()
-            local info_json = utils.format_json(current_anime_info)
+        end
+
+        local function accept_rewatch()
+            cleanup_rewatch()
+            mp.osd_message("Setting to REPEATING...", 3)
+            local safe_path = get_path() or ""
+            local safe_info = current_anime_info and utils.format_json(current_anime_info) or "{}"
+            local safe_opts = python_options_json or "{}"
+            local safe_cmd = python_command or "python"
             mp.command_native_async({
                 name = "subprocess",
-                args = {python_command, script_dir .. "anilistUpdater.py", path, "set_rewatching", python_options_json, info_json},
+                args = {safe_cmd, script_dir .. "anilistUpdater.py", safe_path, "set_rewatching", safe_opts, safe_info},
                 capture_stdout = true
             }, callback)
         end
         local function cancel_rewatch()
+            cleanup_rewatch()
             mp.osd_message("Cancelled rewatch.", 3)
-            mp.remove_key_binding("accept_rewatch")
-            mp.remove_key_binding("cancel_rewatch")
         end
         mp.add_forced_key_binding("ENTER", "accept_rewatch", accept_rewatch)
         mp.add_forced_key_binding("ESC", "cancel_rewatch", cancel_rewatch)
@@ -487,10 +517,12 @@ local function fetch_anime_info(cb)
     end
     is_fetching = true
 
-    local path = get_path()
+    local safe_path = get_path() or ""
+    local safe_opts = python_options_json or "{}"
+    local safe_cmd = python_command or "python"
     mp.command_native_async({
         name = "subprocess",
-        args = {python_command, script_dir .. "anilistUpdater.py", path, "info", python_options_json},
+        args = {safe_cmd, script_dir .. "anilistUpdater.py", safe_path, "info", safe_opts},
         capture_stdout = true
     }, function(success, result)
         is_fetching = false
@@ -548,12 +580,14 @@ function on_pause_change(name, value)
 end
 
 local function update(info)
-    local path = get_path()
-    local info_json = utils.format_json(info)
+    local safe_path = get_path() or ""
+    local safe_info = info and utils.format_json(info) or "{}"
+    local safe_opts = python_options_json or "{}"
+    local safe_cmd = python_command or "python"
 
     mp.command_native_async({
         name = "subprocess",
-        args = {python_command, script_dir .. "anilistUpdater.py", path, "update_with_info", python_options_json, info_json},
+        args = {safe_cmd, script_dir .. "anilistUpdater.py", safe_path, "update_with_info", safe_opts, safe_info},
         capture_stdout = true
     }, callback)
 end

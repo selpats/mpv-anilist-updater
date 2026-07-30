@@ -1252,7 +1252,49 @@ class AniListUpdater:
         user_list_seasons = response["data"]["UserSearch"]["media"]
         global_search_seasons = response["data"]["GlobalSearch"]["media"]
 
-        # If no results for both, raise exception
+        # If no results for both, try keyword fallback search (handling merged/split words like 'Mawatte Iru' -> 'Mawatteiru')
+        if not user_list_seasons and not global_search_seasons:
+            import re
+            import difflib
+            words = re.findall(r'\w+', name)
+            sorted_by_len = sorted([w for w in words if len(w) >= 4], key=len, reverse=True)
+            top_words = [w for w in words if w in sorted_by_len[:2]]
+            fallback_query_str = " ".join(top_words) if top_words else " ".join(words[:2])
+
+            if fallback_query_str and fallback_query_str != name:
+                print(f"Exact search failed for '{name}'. Trying fallback search with '{fallback_query_str}'...")
+                fb_variables = {"search": fallback_query_str, "year": year or 1, "page": 1, "format_in": format_in}
+                fb_response = self._make_api_request(query, fb_variables, self.access_token)
+                fb_user_seasons = fb_response.get("data", {}).get("UserSearch", {}).get("media", [])
+                fb_global_seasons = fb_response.get("data", {}).get("GlobalSearch", {}).get("media", [])
+
+                candidates = fb_user_seasons + fb_global_seasons
+                if candidates:
+                    def norm(s):
+                        return re.sub(r'[^a-z0-9]', '', (s or "").lower())
+
+                    target_norm = norm(name)
+                    best_match = None
+                    best_score = 0.0
+                    for c in candidates:
+                        title_dict = c.get("title", {})
+                        for t_key in ["romaji", "english"]:
+                            c_norm = norm(title_dict.get(t_key))
+                            if not c_norm:
+                                continue
+                            score = 1.0 if c_norm == target_norm else difflib.SequenceMatcher(None, target_norm, c_norm).ratio()
+                            if score > best_score:
+                                best_score = score
+                                best_match = c
+
+                    if best_match and best_score >= 0.80:
+                        print(f"Found match via fallback: '{best_match['title'].get('romaji')}' (similarity: {int(best_score*100)}%)")
+                        if best_match in fb_user_seasons:
+                            user_list_seasons = [best_match]
+                        else:
+                            global_search_seasons = [best_match]
+
+        # If still no results after fallback, raise exception
         if not user_list_seasons and not global_search_seasons:
             raise Exception(f"Couldn't find an anime from this title! ({name}). Is it in your list?")
 
