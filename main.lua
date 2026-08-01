@@ -27,6 +27,7 @@ SILENT_MODE: Boolean. If true, won't show OSD messages.
 local utils = require 'mp.utils'
 local mpoptions = require("mp.options")
 local correction_overlay = require("correction_overlay")
+local select_overlay = require("select_overlay")
 
 local conf_name = "anilistUpdater.conf"
 local script_dir = (debug.getinfo(1).source:match("@?(.*/)") or "./")
@@ -189,6 +190,21 @@ local function path_starts_with_any(path, directories)
     return false
 end
 
+local function check_prompt_select_anime(result)
+    if not result or not result.stdout then return false end
+    for line in result.stdout:gmatch("[^\r\n]+") do
+        local json_part = line:match("^PROMPT_SELECT_ANIME:%s*(.+)$")
+        if json_part then
+            local candidates = utils.parse_json(json_part)
+            if candidates and type(candidates) == "table" and #candidates > 0 then
+                select_overlay.open_select_overlay(get_path(), script_dir, candidates)
+                return true
+            end
+        end
+    end
+    return false
+end
+
 local function parse_detected_info(result)
     if not result or not result.stdout then
         return nil
@@ -211,6 +227,9 @@ function callback(success, result, error, is_info_check)
     local is_success = success and result and result.status == 0
 
     if is_success then
+        if check_prompt_select_anime(result) then
+            return
+        end
         local new_info = parse_detected_info(result)
         if new_info then
             current_anime_info = new_info
@@ -332,8 +351,7 @@ function callback(success, result, error, is_info_check)
         local prompt_timer = nil
 
         local function render_prompt()
-            local has_score = current_score and current_score ~= "None" and current_score ~= ""
-            local curr = has_score and (" (Current: " .. current_score .. ")") or ""
+            local has_score = current_score and current_score ~= "None" and current_score ~= "" and current_score ~= "0" and current_score ~= "0.0"
             local esc_msg = has_score and "(ESC to not change)" or "(ESC to skip)"
             local format_desc = score_format
             if score_format == "POINT_100" then format_desc = "1-100"
@@ -342,7 +360,11 @@ function callback(success, result, error, is_info_check)
             elseif score_format == "POINT_5" then format_desc = "1-5"
             elseif score_format == "POINT_3" then format_desc = "1-3" end
             
-            local msg = 'Finished "' .. prompt_score_name .. '"' .. curr .. '\nRate (' .. format_desc .. '): ' .. input_score .. '_\nENTER to submit, ' .. esc_msg
+            local msg = 'Finished "' .. prompt_score_name .. '"'
+            if has_score then
+                msg = msg .. '\nCurrent Score: ' .. current_score
+            end
+            msg = msg .. '\nRate (' .. format_desc .. '): ' .. input_score .. '_\nENTER to submit, ' .. esc_msg
             mp.osd_message(msg, 1)
         end
 
@@ -527,6 +549,10 @@ local function fetch_anime_info(cb)
     }, function(success, result)
         is_fetching = false
         if success and result and result.status == 0 then
+            if check_prompt_select_anime(result) then
+                if cb then cb(nil) end
+                return
+            end
             current_anime_info = parse_detected_info(result)
             if current_anime_info then
                 print("Detected anime: " .. (current_anime_info.anime_name or "?") .. " #" .. (current_anime_info.episode or "?"))
@@ -688,6 +714,14 @@ function open_folder()
 end
 
 mp.add_key_binding("ctrl+d", 'open_folder', open_folder)
+
+-- Initialize and bind select overlay module
+select_overlay.init({
+    python_command = python_command,
+    python_options_json = python_options_json,
+    callback = callback,
+    fetch_anime_info = fetch_anime_info
+})
 
 -- Initialize and bind correction overlay module
 correction_overlay.init({

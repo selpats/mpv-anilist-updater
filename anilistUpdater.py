@@ -164,6 +164,78 @@ class AniListQueries:
         }
     """
 
+    SEARCH_ANIME_BY_MAL_ID = """
+        query($idMal: Int, $format_in: [MediaFormat]) {
+            GlobalSearch: Page(page: 1, perPage: 1) {
+                media(idMal: $idMal, type: ANIME, format_in: $format_in, status_not:NOT_YET_RELEASED) {
+                    id
+                    idMal
+                    title { romaji, english }
+                    season
+                    seasonYear
+                    episodes
+                    duration
+                    format
+                    status
+                    mediaListEntry {
+                        status
+                        progress
+                        score
+                        media {
+                            episodes
+                        }
+                    }
+                    relations {
+                        edges {
+                            relationType
+                            node {
+                                id
+                                format
+                                title {
+                                    romaji
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            UserSearch: Page(page: 1, perPage: 1) {
+                media(idMal: $idMal, type: ANIME, format_in: $format_in, status_not:NOT_YET_RELEASED, onList: true) {
+                    id
+                    idMal
+                    title { romaji, english }
+                    season
+                    seasonYear
+                    episodes
+                    duration
+                    format
+                    status
+                    startDate { year month day }
+                    mediaListEntry {
+                        status
+                        progress
+                        score
+                        media {
+                            episodes
+                        }
+                    }
+                    relations {
+                        edges {
+                            relationType
+                            node {
+                                id
+                                format
+                                title {
+                                    romaji
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    """
+
     # Mutation to save/update media list entry (works for both adding and updating)
     # Variables: mediaId (Int), progress (Int), status (MediaListStatus), score (Float), startedAt (FuzzyDateInput), completedAt (FuzzyDateInput)
     SAVE_MEDIA_LIST_ENTRY = """
@@ -319,6 +391,7 @@ class AniListUpdater:
             "current_status": current_status,
             "corrected": is_corrected,
             "ttl": now + ttl_refresh_rate,
+            "current_score": current_score,
         }
 
         self.save_cache(cache)
@@ -556,7 +629,10 @@ class AniListUpdater:
             if not self.mal_access_token:
                 return None
 
-        headers = {"Authorization": f"Bearer {self.mal_access_token}"}
+        headers = {
+            "Authorization": f"Bearer {self.mal_access_token}",
+            "User-Agent": "mpv-anilist-updater"
+        }
         url = f"https://api.myanimelist.net/v2/{endpoint}"
 
         response = None
@@ -973,6 +1049,7 @@ class AniListUpdater:
                     relative_episode,
                     cache_entry["current_status"],
                     cache_entry.get("mal_id"),
+                    cache_entry.get("current_score"),
                 )
 
         # At this point, we guess using the guessed name and other information
@@ -1001,6 +1078,7 @@ class AniListUpdater:
                 "current_status": result.current_status,
                 "guessed_name": file_info.name,
                 "absolute_episode": file_info.episode,
+                "current_score": result.current_score,
             }
             print(f"INFO:{json.dumps(payload)}")
             if not self.options.get("ADD_ENTRY_IF_MISSING", False) and result.current_status is None and (result.file_progress == 1 or file_info.episode == 1):
@@ -1294,11 +1372,97 @@ class AniListUpdater:
                         else:
                             global_search_seasons = [best_match]
 
+        # If keyword fallback failed, try Shikimori API fuzzy search -> AniList idMal query
+        if not user_list_seasons and not global_search_seasons:
+            import requests
+            try:
+                print(f"Keyword fallback failed. Trying Shikimori fuzzy search for '{name}'...")
+                shiki_res = requests.get('https://shikimori.one/api/animes', params={'search': name, 'limit': 5}, headers={'User-Agent': 'mpv-updater'}, timeout=5).json()
+                if shiki_res and isinstance(shiki_res, list) and len(shiki_res) > 0:
+                    import difflib
+                    def norm(s):
+                        import re
+                        return re.sub(r'[^a-z0-9]', '', (s or "").lower())
+                    
+                    target_norm = norm(name)
+                    best_score = -1.0
+                    best_mal_id = None
+                    best_name = None
+                    
+                    for res in shiki_res:
+                        res_name = res.get('name', '')
+                        c_norm = norm(res_name)
+                        score_norm = 1.0 if c_norm == target_norm else difflib.SequenceMatcher(None, target_norm, c_norm).ratio()
+                        score_raw = difflib.SequenceMatcher(None, name.lower(), res_name.lower()).ratio()
+                        
+                        # Score formula: Heavily weight normalized score, add raw score for punctuation differences.
+                        # Tie-breaker: subtract a tiny fraction of MAL ID so older seasons win perfect ties.
+                        mal_id = res.get('id', 0)
+                        final_score = (score_norm * 100) + score_raw - (mal_id / 10000000.0)
+                        
+                        if final_score > best_score:
+                            best_score = final_score
+                            best_mal_id = mal_id
+                            best_name = res_name
+
+                    if best_mal_id:
+                        print(f"Shikimori best match: MAL ID {best_mal_id} ('{best_name}'). Querying AniList...")
+                        mal_variables = {"idMal": best_mal_id, "format_in": format_in}
+                        mal_response = self._make_api_request(AniListQueries.SEARCH_ANIME_BY_MAL_ID, mal_variables, self.access_token)
+                        
+                        user_list_seasons = mal_response.get("data", {}).get("UserSearch", {}).get("media", [])
+                        global_search_seasons = mal_response.get("data", {}).get("GlobalSearch", {}).get("media", [])
+                        
+                        if user_list_seasons or global_search_seasons:
+                            print(f"Successfully matched MAL ID {best_mal_id} on AniList!")
+            except Exception as e:
+                print(f"Shikimori fallback failed: {e}")
+
         # If still no results after fallback, raise exception
         if not user_list_seasons and not global_search_seasons:
             raise Exception(f"Couldn't find an anime from this title! ({name}). Is it in your list?")
 
         seasons = user_list_seasons or global_search_seasons  # Priority to the user list
+
+        # --- AMBIGUITY CHECK ---
+        # If there are multiple candidates and we didn't specify a year
+        # (if year was specified, AniList API filtered it for us so we trust seasons[0])
+        if len(seasons) > 1 and not year:
+            import difflib
+            def norm(s):
+                import re
+                return re.sub(r'[^a-z0-9]', '', (s or "").lower())
+            
+            target_norm = norm(name)
+            candidates = []
+            
+            for s in seasons:
+                t_romaji = s.get("title", {}).get("romaji") or ""
+                t_english = s.get("title", {}).get("english") or ""
+                
+                s_romaji = 1.0 if norm(t_romaji) == target_norm else difflib.SequenceMatcher(None, target_norm, norm(t_romaji)).ratio()
+                s_eng = 1.0 if norm(t_english) == target_norm else difflib.SequenceMatcher(None, target_norm, norm(t_english)).ratio()
+                best_s = max(s_romaji, s_eng)
+                
+                # Only consider candidates that are somewhat close to the searched text
+                if best_s > 0.6:
+                    candidates.append({
+                        "id": s.get("id"),
+                        "mal_id": s.get("idMal"),
+                        "name": t_romaji,
+                        "year": s.get("seasonYear") or s.get("startDate", {}).get("year") or "Unknown",
+                        "score": best_s
+                    })
+            
+            candidates.sort(key=lambda x: x["score"], reverse=True)
+            
+            # Trigger interactive prompt if the top 2 are too close to call
+            if len(candidates) > 1 and (candidates[0]["score"] - candidates[1]["score"] <= 0.15 or candidates[1]["score"] > 0.9):
+                import json
+                print(f"PROMPT_SELECT_ANIME:{json.dumps(candidates[:5])}")
+                import sys
+                sys.exit(0)
+        # --- END AMBIGUITY CHECK ---
 
         # Results from the API request from the user's list or from global search.
         # If from global search then entry will be None, and the anime will be added if ADD_ENTRY_IF_MISSING
@@ -1956,6 +2120,12 @@ def run_action(updater: AniListUpdater) -> None:
             updater.correct_anime_id(filepath, int(sys.argv[4]), int(sys.argv[5]), sys.argv[6], anime_info)
         else:
             updater.correct_anime_id(filepath, int(sys.argv[4]), None, sys.argv[5], anime_info)
+    elif action == "save_cache":
+        # sys.argv = [python, script, path, "save_cache", opts, anime_id]
+        anime_id = int(sys.argv[5])
+        file_info = updater.parse_filename(filepath)
+        updater.update_cache(file_info.name, anime_id)
+        print(f"Saved {anime_id} to cache for {file_info.name}")
     else:
         updater.handle_filename(filepath)
 
