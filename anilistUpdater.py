@@ -261,6 +261,7 @@ class AniListQueries:
                 mediaListEntry {
                     status
                     progress
+                    score
                 }
             }
         }
@@ -1915,6 +1916,7 @@ class AniListUpdater:
             "total_episodes": media.get("episodes"),
             "current_progress": entry.get("progress") if entry else fallback_progress,
             "current_status": entry.get("status") if entry else fallback_status,
+            "current_score": entry.get("score") if entry else None,
         }
 
     def _correct_relative_episode(
@@ -1988,6 +1990,7 @@ class AniListUpdater:
         total_episodes = anime_info.get("total_episodes")
         current_progress = anime_info.get("current_progress")
         current_status = anime_info.get("current_status")
+        current_score = anime_info.get("current_score")
 
         if id_changed:
             id_data = self._correct_anime_id_change(
@@ -2001,6 +2004,7 @@ class AniListUpdater:
             total_episodes = id_data["total_episodes"]
             current_progress = id_data["current_progress"]
             current_status = id_data["current_status"]
+            current_score = id_data.get("current_score")
 
         existing_relative_episode = anime_info.get("episode") or absolute_episode
         mapped_relative_episode = (
@@ -2066,6 +2070,7 @@ class AniListUpdater:
                 "current_status": current_status,
                 "corrected": True if id_changed else existing_entry.get("corrected", False),
                 "ttl": time.time() + self.CORRECTED_CACHE_REFRESH_RATE,
+                "current_score": current_score,
             },
         )
 
@@ -2082,6 +2087,7 @@ class AniListUpdater:
             "current_status": current_status,
             "guessed_name": guessed_name,
             "absolute_episode": absolute_episode,
+            "current_score": current_score,
         }
         print(f"INFO:{json.dumps(corrected_payload)}")
 
