@@ -204,7 +204,20 @@ local function check_prompt_select_anime(result)
     end
     return false
 end
-
+local function parse_osd_messages(result)
+    local messages = {}
+    if result and result.stdout then
+        for line in result.stdout:gmatch("[^\r\n]+") do
+            local msg = line:match("^OSD:%s*(.-)%s*$")
+            if msg then
+                table.insert(messages, msg)
+            else
+                print(line)
+            end
+        end
+    end
+    return messages
+end
 local function parse_detected_info(result)
     if not result or not result.stdout then
         return nil
@@ -558,6 +571,8 @@ local function fetch_anime_info(cb)
                 print("Detected anime: " .. (current_anime_info.anime_name or "?") .. " #" .. (current_anime_info.episode or "?"))
             end
             callback(success, result, nil, true)
+        else
+            parse_osd_messages(result)
         end
         if cb then
             cb(current_anime_info)
