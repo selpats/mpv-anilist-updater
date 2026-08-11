@@ -1959,6 +1959,55 @@ class AniListUpdater:
         cache[dir_hash] = payload
         self.save_cache(cache)
 
+    def save_cache_from_id(self, path: str, new_id: int, mapped_episode: int | None = None) -> None:
+        """Fetch anime info from ID and save to cache securely keyed to path."""
+        file_info = self.parse_filename(path)
+        query = '''
+        query ($id: Int) {
+          Media(id: $id, type: ANIME) {
+            id
+            idMal
+            title { romaji }
+            episodes
+            status
+            mediaListEntry { progress status score }
+          }
+        }
+        '''
+        variables = {"id": new_id}
+        response = self._make_api_request(query, variables, self.access_token)
+        media = response["data"]["Media"]
+        
+        anime_id = media["id"]
+        mal_id = media.get("idMal")
+        entry = media.get("mediaListEntry")
+        current_progress = entry["progress"] if entry else None
+        current_status = entry["status"] if entry else None
+        current_score = entry["score"] if entry else None
+        
+        import os, time
+        dir_hash = self._hash_path(os.path.dirname(path))
+        cache = self.load_cache()
+        
+        rel_ep = mapped_episode if mapped_episode is not None else file_info.episode
+        
+        self._correct_cache(
+            cache,
+            dir_hash,
+            {
+                "guessed_name": file_info.name,
+                "anime_id": anime_id,
+                "mal_id": mal_id,
+                "current_progress": current_progress,
+                "relative_progress": f"{file_info.episode}->{rel_ep}",
+                "total_episodes": media.get("episodes"),
+                "current_status": current_status,
+                "corrected": True,
+                "ttl": time.time() + self.CORRECTED_CACHE_REFRESH_RATE,
+                "current_score": current_score,
+            },
+        )
+
     def correct_anime_id(
         self,
         filepath: str,
@@ -2127,11 +2176,11 @@ def run_action(updater: AniListUpdater) -> None:
         else:
             updater.correct_anime_id(filepath, int(sys.argv[4]), None, sys.argv[5], anime_info)
     elif action == "save_cache":
-        # sys.argv = [python, script, path, "save_cache", opts, anime_id]
-        anime_id = int(sys.argv[5])
-        file_info = updater.parse_filename(filepath)
-        updater.update_cache(file_info.name, anime_id)
-        print(f"Saved {anime_id} to cache for {file_info.name}")
+        anime_id = int(sys.argv[4])
+        mapped_episode = sys.argv[5] if len(sys.argv) > 5 else ""
+        mapped_episode = int(mapped_episode) if mapped_episode.isdigit() else None
+        updater.save_cache_from_id(filepath, anime_id, mapped_episode)
+        print(f"Saved {anime_id} to cache")
     else:
         updater.handle_filename(filepath)
 
