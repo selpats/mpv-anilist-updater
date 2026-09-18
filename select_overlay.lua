@@ -70,7 +70,8 @@ local function submit_selection()
     end
 
     local anime_id = selected.id
-    local args = {python_command, overlay.s_dir .. "anilistUpdater.py", overlay.path, "save_cache", python_options_json, tostring(anime_id)}
+    local mapped_ep = selected.mapped_episode and tostring(selected.mapped_episode) or ""
+    local args = {python_command, overlay.s_dir .. "anilistUpdater.py", overlay.path, "save_cache", python_options_json, tostring(anime_id), mapped_ep}
 
     close_overlay()
     mp.osd_message("Saving selection...", 2)

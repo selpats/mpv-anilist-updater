@@ -82,6 +82,7 @@ ADD_ENTRY_IF_MISSING=no
 CACHE_REFRESH_RATE=24
 CACHE_MODE=NORMAL
 SILENT_MODE=no
+ANI_CLI_COMPATIBILITY=no
 ]]
 
 -- Try script-opts directory (sibling to scripts)
@@ -151,7 +152,8 @@ local options = {
     ADD_ENTRY_IF_MISSING = false,
     CACHE_REFRESH_RATE = 24,
     CACHE_MODE = "NORMAL",
-    SILENT_MODE = false
+    SILENT_MODE = false,
+    ANI_CLI_COMPATIBILITY = false
 }
 
 -- Override defaults with values from config file
@@ -246,6 +248,9 @@ function callback(success, result, error, is_info_check)
         local new_info = parse_detected_info(result)
         if new_info then
             current_anime_info = new_info
+            if new_info.skipped then
+                return
+            end
         end
     end
 
@@ -264,7 +269,7 @@ function callback(success, result, error, is_info_check)
             local msg = line:match("^OSD:%s*(.-)%s*$")
             local rw_name = line:match("^PROMPT_REWATCH:%s*(.-)%s*$")
             local pl_name = line:match("^PROMPT_ADD_PLANNING:%s*(.-)%s*$")
-            local s_name, s_format, s_curr = line:match("^PROMPT_SCORE:(.-):(.-):(.-)$")
+            local s_name, s_format, s_curr = line:match("^PROMPT_SCORE:(.+):([^:]+):([^:]*)$")
             if s_name then
                 prompt_score_name = s_name
                 score_format = s_format
@@ -509,6 +514,9 @@ end
 
 -- Helper function to detect ani-cli compatibility
 local function is_ani_cli_compatible()
+    if not options.ANI_CLI_COMPATIBILITY then
+        return false
+    end
     local directory = mp.get_property("working-directory") or ""
     local file_path = mp.get_property("path") or ""
     local full_path = utils.join_path(directory, file_path)
@@ -526,7 +534,7 @@ get_path = function()
     local path = utils.join_path(directory, file_path)
 
     -- Auto-detect ani-cli compatibility by checking for http:// or https:// anywhere in the path
-    if path:match("https?://") then
+    if is_ani_cli_compatible() then
         local media_title = mp.get_property("media-title")
         if media_title and media_title ~= "" then
             return media_title
@@ -567,7 +575,7 @@ local function fetch_anime_info(cb)
                 return
             end
             current_anime_info = parse_detected_info(result)
-            if current_anime_info then
+            if current_anime_info and not current_anime_info.skipped then
                 print("Detected anime: " .. (current_anime_info.anime_name or "?") .. " #" .. (current_anime_info.episode or "?"))
             end
             callback(success, result, nil, true)
@@ -636,13 +644,16 @@ end
 -- Function to launch the .py script to update AniList
 function update_anilist()
     if current_anime_info then
+        if current_anime_info.skipped then
+            return
+        end
         update(current_anime_info)
     else
         fetch_anime_info(function(info)
-            if info then
+            if info and not info.skipped then
                 update(info)
             else
-                if not options.SILENT_MODE then
+                if not options.SILENT_MODE and (not info or not info.skipped) then
                     mp.osd_message("Error: Anime info not loaded yet.", 3)
                 end
             end
@@ -660,15 +671,24 @@ mp.register_event("file-loaded", function()
     is_fetching = false
     progress_timer:stop()
 
-    if not is_ani_cli_compatible() and #DIRECTORIES > 0 then
-        local path = get_path()
+    local file_path = mp.get_property("path") or ""
+    local is_url = file_path:match("https?://") ~= nil
 
-        if not path_starts_with_any(path, DIRECTORIES) then
+    if is_url then
+        if not is_ani_cli_compatible() then
             return
-        else
-            -- If it starts with the directories, check if it starts with any of the excluded directories
-            if #EXCLUDED_DIRECTORIES > 0 and path_starts_with_any(path, EXCLUDED_DIRECTORIES) then
+        end
+    else
+        if #DIRECTORIES > 0 then
+            local path = get_path()
+
+            if not path_starts_with_any(path, DIRECTORIES) then
                 return
+            else
+                -- If it starts with the directories, check if it starts with any of the excluded directories
+                if #EXCLUDED_DIRECTORIES > 0 and path_starts_with_any(path, EXCLUDED_DIRECTORIES) then
+                    return
+                end
             end
         end
     end

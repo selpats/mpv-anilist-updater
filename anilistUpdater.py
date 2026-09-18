@@ -118,6 +118,12 @@ class AniListQueries:
                             node {
                                 id
                                 format
+                                episodes
+                                mediaListEntry {
+                                    status
+                                    progress
+                                    score
+                                }
                                 title {
                                     romaji
                                 }
@@ -153,6 +159,12 @@ class AniListQueries:
                             node {
                                 id
                                 format
+                                episodes
+                                mediaListEntry {
+                                    status
+                                    progress
+                                    score
+                                }
                                 title {
                                     romaji
                                 }
@@ -360,7 +372,30 @@ class AniListUpdater:
         Returns:
             str: Hashed path.
         """
-        return hashlib.sha256(path.encode("utf-8")).hexdigest()
+        norm_path = os.path.normcase(os.path.normpath(path)).replace("\\", "/")
+        return hashlib.sha256(norm_path.encode("utf-8")).hexdigest()
+
+    def _save_entry_to_dir_cache(self, cache: dict[str, Any], dir_hash: str, payload: dict[str, Any]) -> None:
+        """Helper to save or update an entry inside a directory's cache list."""
+        dir_data = cache.get(dir_hash)
+        if isinstance(dir_data, dict) and "entries" in dir_data:
+            entries_list = dir_data["entries"]
+        elif isinstance(dir_data, dict) and "anime_id" in dir_data:
+            entries_list = [dir_data]
+        else:
+            entries_list = []
+
+        updated = False
+        for i, existing in enumerate(entries_list):
+            if existing.get("anime_id") == payload.get("anime_id"):
+                entries_list[i] = payload
+                updated = True
+                break
+        if not updated:
+            entries_list.append(payload)
+
+        cache[dir_hash] = {"entries": entries_list}
+        self.save_cache(cache)
 
     def cache_to_file(self, path: str, guessed_name: str, absolute_progress: int, result: AnimeInfo) -> None:
         """
@@ -374,15 +409,15 @@ class AniListUpdater:
         """
         dir_hash = self._hash_path(os.path.dirname(path))
         cache = self.load_cache()
-        existing_entry = cache.get(dir_hash, {})
-        is_corrected = bool(existing_entry.get("corrected", False))
+        existing_entry = self.check_and_clean_cache(path, guessed_name, absolute_progress)
+        is_corrected = bool(existing_entry and existing_entry.get("corrected", False))
 
         anime_id, _, current_progress, total_episodes, relative_progress, current_status, mal_id, current_score = result
 
         now = time.time()
         ttl_refresh_rate = self.CORRECTED_CACHE_REFRESH_RATE if is_corrected else self.CACHE_REFRESH_RATE
 
-        cache[dir_hash] = {
+        payload = {
             "guessed_name": guessed_name,
             "anime_id": anime_id,
             "mal_id": mal_id,
@@ -394,16 +429,16 @@ class AniListUpdater:
             "ttl": now + ttl_refresh_rate,
             "current_score": current_score,
         }
+        self._save_entry_to_dir_cache(cache, dir_hash, payload)
 
-        self.save_cache(cache)
-
-    def check_and_clean_cache(self, path: str, guessed_name: str) -> dict[str, Any] | None:
+    def check_and_clean_cache(self, path: str, guessed_name: str, episode: int | None = None) -> dict[str, Any] | None:
         """
         Get valid cache entry and clean expired entries.
 
         Args:
             path (str): Path to media file.
             guessed_name (str): Guessed anime name.
+            episode (int | None): Optional episode number for matching specific season/special.
 
         Returns:
             dict[str, Any] | None: Cache entry or None if not found/valid.
@@ -414,37 +449,59 @@ class AniListUpdater:
 
         # Purge expired
         for k, v in list(cache.items()):
-            if isinstance(v, dict) and v.get("ttl", 0) < now:
+            if isinstance(v, dict) and "entries" in v:
+                v["entries"] = [e for e in v["entries"] if isinstance(e, dict) and e.get("ttl", 0) >= now]
+                if not v["entries"]:
+                    cache.pop(k, None)
+                    changed = True
+            elif isinstance(v, dict) and v.get("ttl", 0) < now:
                 cache.pop(k, None)
                 changed = True
 
         dir_hash = self._hash_path(os.path.dirname(path))
-        entry = cache.get(dir_hash)
-
-        if entry and entry.get("guessed_name") == guessed_name:
-            # Determine whether to apply sliding expiration.
-            apply_sliding = self.CACHE_MODE == "SLIDING" or entry.get("corrected", False)
-
-            if apply_sliding:
-                # Choose refresh window based on whether the entry is corrected.
-                refresh_rate = (
-                    self.CORRECTED_CACHE_REFRESH_RATE if entry.get("corrected", False) else self.CACHE_REFRESH_RATE
-                )
-                # If close to expiration (within half of its TTL), extend it.
-                if entry.get("ttl", 0) <= now + (refresh_rate // 2):
-                    entry["ttl"] = now + refresh_rate
-                    cache[dir_hash] = entry
-                    changed = True
-
+        dir_data = cache.get(dir_hash)
+        if not dir_data:
             if changed:
                 self.save_cache(cache)
+            return None
 
-            return entry
+        if isinstance(dir_data, dict) and "entries" in dir_data:
+            entries_list = dir_data["entries"]
+        elif isinstance(dir_data, dict) and "anime_id" in dir_data:
+            entries_list = [dir_data]
+        else:
+            entries_list = []
+
+        matched_entry = None
+        for item in entries_list:
+            if item.get("guessed_name") == guessed_name:
+                if episode is not None:
+                    left, right = item.get("relative_progress", "0->0").split("->")
+                    offset = int(left) - int(right)
+                    rel_ep = episode - offset
+                    if 1 <= rel_ep <= (item.get("total_episodes") or 999):
+                        matched_entry = item
+                        break
+                else:
+                    matched_entry = item
+                    break
+
+        if matched_entry:
+            # Determine whether to apply sliding expiration.
+            apply_sliding = self.CACHE_MODE == "SLIDING" or matched_entry.get("corrected", False)
+
+            if apply_sliding:
+                refresh_rate = (
+                    self.CORRECTED_CACHE_REFRESH_RATE if matched_entry.get("corrected", False) else self.CACHE_REFRESH_RATE
+                )
+                if matched_entry.get("ttl", 0) <= now + (refresh_rate // 2):
+                    matched_entry["ttl"] = now + refresh_rate
+                    changed = True
 
         if changed:
             self.save_cache(cache)
 
-        return None
+        return matched_entry
 
     def load_cache(self) -> dict[str, Any]:
         """
@@ -1024,7 +1081,7 @@ class AniListUpdater:
             filename (str): Path to video file.
         """
         file_info = self.parse_filename(filename)
-        cache_entry = self.check_and_clean_cache(filename, file_info.name)
+        cache_entry = self.check_and_clean_cache(filename, file_info.name, file_info.episode)
         result = None
 
         # Use cached data if available, otherwise fetch fresh info
@@ -1098,6 +1155,10 @@ class AniListUpdater:
         Returns:
             list[str]: Modified path components.
         """
+        for i in range(len(path_parts)):
+            # Convert TV-2, TV 2, TV2 to S2 for guessit to recognize season properly
+            path_parts[i] = re.sub(r"\bTV[- ]?(\d+)\b", r"S\1 ", path_parts[i], flags=re.IGNORECASE)
+
         # Before using guessit, clean up the filename
         path_parts[-1] = re.sub(self.CLEAN_PATTERN, " ", path_parts[-1])
         path_parts[-1] = " ".join(path_parts[-1].split())
@@ -1423,7 +1484,51 @@ class AniListUpdater:
         if not user_list_seasons and not global_search_seasons:
             raise Exception(f"Couldn't find an anime from this title! ({name}). Is it in your list?")
 
-        seasons = user_list_seasons or global_search_seasons  # Priority to the user list
+        # Determine whether user_list_seasons has a valid match, or if global_search_seasons is significantly better
+        import difflib
+        import re
+
+        def get_best_match_score(seasons_list, target_name):
+            target_norm = re.sub(r'[^a-z0-9]', '', target_name.lower())
+            best = 0.0
+            for s in seasons_list:
+                for t_key in ["romaji", "english"]:
+                    t_val = s.get("title", {}).get(t_key) or ""
+                    c_norm = re.sub(r'[^a-z0-9]', '', t_val.lower())
+                    if not c_norm:
+                        continue
+                    if c_norm == target_norm:
+                        return 1.0
+                    score = difflib.SequenceMatcher(None, target_norm, c_norm).ratio()
+                    if score > best:
+                        best = score
+            return best
+
+        user_score = get_best_match_score(user_list_seasons, name)
+        global_score = get_best_match_score(global_search_seasons, name)
+
+        if user_list_seasons and global_search_seasons and user_score < 0.6 and global_score >= 0.8:
+            seasons = global_search_seasons
+        else:
+            seasons = user_list_seasons or global_search_seasons
+
+        # Sort selected seasons by title match similarity so that the best match is always first
+        def match_score_item(s):
+            target_norm = re.sub(r'[^a-z0-9]', '', name.lower())
+            best = 0.0
+            for t_key in ["romaji", "english"]:
+                t_val = s.get("title", {}).get(t_key) or ""
+                c_norm = re.sub(r'[^a-z0-9]', '', t_val.lower())
+                if c_norm == target_norm:
+                    return 1.0
+                if c_norm:
+                    score = difflib.SequenceMatcher(None, target_norm, c_norm).ratio()
+                    if score > best:
+                        best = score
+            return best
+
+        if len(seasons) > 1:
+            seasons.sort(key=match_score_item, reverse=True)
 
         # --- AMBIGUITY CHECK ---
         # If there are multiple candidates and we didn't specify a year
@@ -1458,7 +1563,9 @@ class AniListUpdater:
             candidates.sort(key=lambda x: x["score"], reverse=True)
             
             # Trigger interactive prompt if the top 2 are too close to call
-            if len(candidates) > 1 and (candidates[0]["score"] - candidates[1]["score"] <= 0.15 or candidates[1]["score"] > 0.9):
+            # Skip ambiguity check if this is an absolute numbering scenario
+            is_likely_absolute = seasons and seasons[0].get("episodes") and file_progress > seasons[0]["episodes"]
+            if not is_likely_absolute and len(candidates) > 1 and (candidates[0]["score"] - candidates[1]["score"] <= 0.15 or candidates[1]["score"] > 0.9):
                 import json
                 print(f"PROMPT_SELECT_ANIME:{json.dumps(candidates[:5])}")
                 import sys
@@ -1487,19 +1594,151 @@ class AniListUpdater:
             filtered_seasons = self.filter_valid_seasons(seasons)
             season_episode_info = self.find_season_and_episode(filtered_seasons, file_progress)
 
-            # If it is None, needs to use global searchto find out the series exact episode
+            # If it is None, needs to use global search to find out the series exact episode
             if not filtered_seasons or season_episode_info.season_id is None:
                 seasons = global_search_seasons
 
                 # At this point it should either have the correct main series or it failed
                 # Recalculate both
-                filtered_seasons = self.filter_valid_seasons(seasons)
-                season_episode_info = self.find_season_and_episode(filtered_seasons, file_progress)
+                global_filtered = self.filter_valid_seasons(seasons)
+                if global_filtered:
+                    filtered_seasons = global_filtered
+                    season_episode_info = self.find_season_and_episode(filtered_seasons, file_progress)
 
-                if filtered_seasons is None or season_episode_info.season_id is None:
-                    raise Exception(f"No valid seasons found for '{name}'.")
+            # Check for SIDE_STORY specials / OVAs linked to the main season
+            original_main_season = seasons[0] if seasons else None
+            main_season = (filtered_seasons[0] if filtered_seasons else None) or original_main_season or (global_search_seasons[0] if global_search_seasons else None)
+            season_episodes = (main_season.get("episodes") or 0) if main_season else 0
+            diff = file_progress - season_episodes
+
+            side_stories = []
+            sources = [s for s in [original_main_season, (filtered_seasons[0] if filtered_seasons else None), (global_search_seasons[0] if global_search_seasons else None)] if s]
+            for src in sources:
+                for edge in src.get("relations", {}).get("edges", []):
+                    if edge.get("relationType") == "SIDE_STORY":
+                        node = edge.get("node")
+                        if node and not any(ss["id"] == node["id"] for ss in side_stories):
+                            side_stories.append(node)
+
+            # Prioritize OVAs and SPECIALs over ONAs
+            side_stories.sort(key=lambda s: 0 if s.get("format") in {"OVA", "SPECIAL"} else 1)
+
+            # Build list of VALID candidates whose episode counts can accommodate file_progress
+            ACTIVE_STATUSES = {"CURRENT", "PAUSED", "DROPPED", "COMPLETED", "REPEATING"}
+            valid_candidates = []
+
+            # 1. Evaluate Side Stories
+            for ss in side_stories:
+                ss_episodes = ss.get("episodes") or 1
+                # Valid only if diff falls within this side story's episode count
+                if 1 <= diff <= ss_episodes:
+                    mapped_ep = diff if ss_episodes > 1 else 1
+                    format_str = ss.get("format") or "Special"
+                    entry = ss.get("mediaListEntry") or {}
+                    status = entry.get("status")
+                    status_label = f" [{status}]" if status else ""
+                    valid_candidates.append({
+                        "id": ss["id"],
+                        "mal_id": None,
+                        "name": ss.get("title", {}).get("romaji", "Unknown"),
+                        "year": f"{format_str} / Side Story{status_label}",
+                        "score": 0.99 if status != "CURRENT" else 1.1,
+                        "mapped_episode": mapped_ep,
+                        "status": status,
+                        "is_special": True
+                    })
+
+            # 2. Evaluate Sequel
+            if season_episode_info.season_id:
+                sequel_episodes = season_episode_info.episodes or 999
+                if 1 <= season_episode_info.relative_episode <= sequel_episodes:
+                    found_season_item = next((s for s in seasons if s.get("id") == season_episode_info.season_id), None)
+                    sequel_entry = (found_season_item.get("mediaListEntry") or {}) if found_season_item else {}
+                    sequel_status = sequel_entry.get("status")
+                    status_label = f" [{sequel_status}]" if sequel_status else ""
+                    valid_candidates.append({
+                        "id": season_episode_info.season_id,
+                        "mal_id": None,
+                        "name": season_episode_info.season_title,
+                        "year": f"Sequel{status_label}",
+                        "score": 1.0 if sequel_status != "CURRENT" else 1.2,
+                        "mapped_episode": season_episode_info.relative_episode,
+                        "status": sequel_status,
+                        "is_special": False
+                    })
+
+            # Decide whether to prompt or pick automatically
+            has_active_candidate = any(c.get("status") in ACTIVE_STATUSES for c in valid_candidates)
+            should_prompt = False
+
+            if has_active_candidate:
+                # If an OVA or Sequel is on the user list, only prompt if multiple candidates are valid for this episode number
+                # (e.g. Ep 14 could be OVA Ep 2 or Sequel Ep 2 -> prompt. But Ep 20 exceeds 6-ep OVA -> no prompt, picks Sequel).
+                if len(valid_candidates) > 1:
+                    should_prompt = True
+            else:
+                # Neither candidate is on the user list (not in list or in PLANNING):
+                if len(valid_candidates) > 1:
+                    if diff <= 2:
+                        # Prompt on immediate next episodes (diff <= 2) if multiple candidates exist
+                        should_prompt = True
+                    else:
+                        # diff > 2: multiple candidates exist, not in list or in planning.
+                        # Do not prompt and do not auto-add or auto-pick anything.
+                        import sys
+                        print(f"Skipping: ambiguous candidates ({len(valid_candidates)}) with diff {diff} > 2 and no active status.")
+                        print('INFO:{"skipped": true}')
+                        sys.exit(0)
+
+            if should_prompt:
+                def sort_key(c):
+                    if c.get("status") == "CURRENT":
+                        return 0
+                    if c.get("status") in ACTIVE_STATUSES:
+                        return 1
+                    if c.get("is_special"):
+                        return 2
+                    return 3
+
+                valid_candidates.sort(key=sort_key)
+                import json, sys
+                print(f"PROMPT_SELECT_ANIME:{json.dumps(valid_candidates[:5])}")
+                sys.exit(0)
 
             seasons = filtered_seasons
+
+            def auto_pick_key(c):
+                if c.get("status") == "CURRENT":
+                    return 0
+                if c.get("status") in ACTIVE_STATUSES:
+                    return 1
+                if not c.get("is_special"):
+                    return 2
+                return 3
+
+            valid_candidates.sort(key=auto_pick_key)
+
+            if valid_candidates and valid_candidates[0]["is_special"]:
+                chosen_cand = valid_candidates[0]
+                ss_node = next((ss for ss in side_stories if ss["id"] == chosen_cand["id"]), None)
+                if ss_node:
+                    found_entry = ss_node.get("mediaListEntry")
+                    anime_data = AnimeInfo(
+                        ss_node["id"],
+                        ss_node.get("title", {}).get("romaji") or chosen_cand["name"],
+                        found_entry["progress"] if found_entry else None,
+                        ss_node.get("episodes"),
+                        chosen_cand["mapped_episode"],
+                        found_entry["status"] if found_entry else None,
+                        ss_node.get("idMal"),
+                        found_entry["score"] if found_entry else None,
+                    )
+                    print(f"Final guessed anime: {anime_data.anime_name}")
+                    print(f"Absolute episode {file_progress} corresponds to episode: {anime_data.file_progress}")
+                    return anime_data
+
+            if season_episode_info.season_id is None:
+                raise Exception(f"No valid seasons or specials found for '{name}'.")
 
             found_season = next(
                 (season for season in seasons if season["id"] == season_episode_info.season_id), None
@@ -1655,7 +1894,7 @@ class AniListUpdater:
                 file_progress,
                 score=score_to_set,
                 set_start_date=(
-                    status_to_set == "CURRENT"
+                    (status_to_set == "CURRENT" or status_to_set == "COMPLETED")
                     and current_status != "CURRENT"
                     and current_status != "REPEATING"
                 ),
@@ -1689,7 +1928,7 @@ class AniListUpdater:
             file_progress,
             is_rewatching=(True if status_to_set == "REPEATING" else (False if current_status == "REPEATING" and status_to_set == "COMPLETED" else None)),
             set_start_date=(
-                status_to_set == "CURRENT"
+                (status_to_set == "CURRENT" or status_to_set == "COMPLETED")
                 and current_status != "CURRENT"
                 and current_status != "REPEATING"
             ),
@@ -1956,8 +2195,7 @@ class AniListUpdater:
 
     def _correct_cache(self, cache: dict[str, Any], dir_hash: str, payload: dict[str, Any]) -> None:
         """Persist corrected mapping into cache.json."""
-        cache[dir_hash] = payload
-        self.save_cache(cache)
+        self._save_entry_to_dir_cache(cache, dir_hash, payload)
 
     def save_cache_from_id(self, path: str, new_id: int, mapped_episode: int | None = None) -> None:
         """Fetch anime info from ID and save to cache securely keyed to path."""
@@ -2154,8 +2392,18 @@ def osd_message(msg: str) -> None:
 
 def run_action(updater: AniListUpdater) -> None:
     """Execute the appropriate updater action based on command line arguments."""
-    action = sys.argv[2]
     filepath = sys.argv[1]
+    
+    # Expand Windows 8.3 short paths to long paths
+    import os
+    if os.name == 'nt' and '~' in filepath:
+        import ctypes
+        buf = ctypes.create_unicode_buffer(1024)
+        res = ctypes.windll.kernel32.GetLongPathNameW(filepath, buf, 1024)
+        if res != 0:
+            filepath = buf.value
+
+    action = sys.argv[2]
     updater._current_action = action
     if action == "set_planning" and len(sys.argv) > 4:
         anime_info_json = json.loads(sys.argv[4])
