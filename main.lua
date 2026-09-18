@@ -521,8 +521,8 @@ local function is_ani_cli_compatible()
     local file_path = mp.get_property("path") or ""
     local full_path = utils.join_path(directory, file_path)
     
-    -- Auto-detect ani-cli compatibility by checking for http:// or https:// anywhere in the path
-    return full_path:match("https?://") ~= nil
+    -- Auto-detect ani-cli compatibility by checking for http:// or https:// anywhere in the path, excluding local streams (127.0.0.1)
+    return full_path:match("https?://") ~= nil and not full_path:find("127.0.0.1", 1, true)
 end
 
 get_path = function()

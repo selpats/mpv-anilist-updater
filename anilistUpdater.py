@@ -303,6 +303,9 @@ class AniListUpdater:
     # Matches any of the chars, only if not followed by a whitespace and a digit.
     CLEAN_PATTERN: str = rf"(?: - Movie)|[{re.escape(_CHARS_TO_REPLACE)}](?!\s*\d)"
     VERSION_REGEX: re.Pattern[str] = re.compile(r"(E\d+)v\d")
+    SEASON_EPISODE_REGEX: re.Pattern[str] = re.compile(
+        r"\b(?:season\s*|s)(\d+)\s*[-_ ]\s*(\d{1,4})\b", re.IGNORECASE
+    )
 
     # ──────────────────────────────────────────────────────────────────────────────────────────────────
     # INITIALIZATION & TOKEN HANDLING
@@ -1168,6 +1171,10 @@ class AniListUpdater:
         if match:
             episode = match.group(1)
             path_parts[-1] = path_parts[-1].replace(match.group(0), episode)
+
+        # Convert "Season 2 - 02", "Season 2 02", "S2 - 02", etc. into "S2 E02"
+        # so GuessIt doesn't mistake it for a season range or break titles with numbers
+        path_parts[-1] = self.SEASON_EPISODE_REGEX.sub(r"S\1 E\2", path_parts[-1])
 
         return path_parts
 
@@ -2265,6 +2272,18 @@ class AniListUpdater:
             anime_info (dict[str, Any]): Pre-fetched anime info.
 
         """
+        # It can be none, but we still need to populate it to save it correctly on cache
+        if not anime_info:
+            file_info = self.parse_filename(filepath)
+            episode = file_info.episode or 1
+            anime_info = {
+                "guessed_name": file_info.name,
+                "absolute_episode": episode,
+                "anime_id": None,
+                "episode": episode,
+            }
+
+
         selected_status = target_status.upper() if target_status else None
 
         guessed_name = anime_info.get("guessed_name", "")
