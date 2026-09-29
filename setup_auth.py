@@ -2,6 +2,7 @@
 
 import json
 import secrets
+import time
 import urllib.parse
 from pathlib import Path
 
@@ -71,6 +72,8 @@ def main() -> None:
             "access_token": token_data["access_token"],
             "refresh_token": token_data["refresh_token"],
         }
+        if "expires_in" in token_data:
+            auth_payload["expires_at"] = int(time.time()) + int(token_data["expires_in"])
 
         with open(AUTH_FILE, "w", encoding="utf-8") as f:
             json.dump(auth_payload, f, indent=4)

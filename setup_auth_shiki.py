@@ -1,6 +1,7 @@
 """Setup authentication for Shikimori integration."""
 
 import json
+import time
 from pathlib import Path
 
 import requests
@@ -83,6 +84,8 @@ def main() -> None:
             "refresh_token": refresh_token,
             "user_id": user_id,
         }
+        if "expires_in" in token_data:
+            auth_payload["expires_at"] = int(time.time()) + int(token_data["expires_in"])
 
         with open(AUTH_FILE, "w", encoding="utf-8") as f:
             json.dump(auth_payload, f, indent=4)

@@ -580,7 +580,7 @@ local function fetch_anime_info(cb)
             end
             callback(success, result, nil, true)
         else
-            parse_osd_messages(result)
+            callback(success, result, nil, true)
         end
         if cb then
             cb(current_anime_info)

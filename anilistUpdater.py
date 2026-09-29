@@ -334,9 +334,11 @@ class AniListUpdater:
         self.CACHE_MODE = str(self.options.get("CACHE_MODE", self.CACHE_MODE)).upper()
         self.mal_auth_path: str = os.path.join(os.path.dirname(__file__), "mal_auth.json")
         self.mal_access_token: str | None = None
+        self._mal_auth_notified: bool = False
         self.shiki_auth_path: str = os.path.join(os.path.dirname(__file__), "shiki_auth.json")
         self.shiki_access_token: str | None = None
         self.shiki_user_id: int | None = None
+        self._shiki_auth_notified: bool = False
 
     # Load token from anilistToken.txt
     def _load_access_token(self) -> str | None:
@@ -599,12 +601,30 @@ class AniListUpdater:
             return response_json
 
         error_msg = response_json.get("errors", [{}])[0].get("message", "Unknown error")
-        osd_message(f"API request failed: {error_msg}")
+        if response.status_code in {400, 401} and ("auth" in error_msg.lower() or "token" in error_msg.lower()):
+            osd_message("AniList: Authorization error! Check anilistToken.txt")
+        else:
+            osd_message(f"API request failed: {error_msg}")
         raise Exception(f"API request failed: {response.status_code} - {error_msg}")
 
     # ──────────────────────────────────────────────────────────────────────────────────────────────────
     # MYANIMELIST API COMMUNICATION
     # ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+    def _notify_mal_auth_error(
+        self, message: str = "MyAnimeList: Authorization expired. Run setup_auth.py"
+    ) -> None:
+        if not getattr(self, "_mal_auth_notified", False):
+            self._mal_auth_notified = True
+            osd_message(message)
+
+    def _set_mal_auth_error(self, reason: str = "") -> None:
+        auth_data = self._read_mal_auth()
+        if auth_data:
+            auth_data["auth_error"] = True
+            if reason:
+                auth_data["auth_error_reason"] = reason
+            self._write_mal_auth(auth_data)
 
     def _load_mal_access_token(self) -> str | None:
         """
@@ -614,11 +634,17 @@ class AniListUpdater:
             str | None: Access token or None if not found.
         """
         try:
-            if not os.path.exists(self.mal_auth_path):
+            auth_data = self._read_mal_auth()
+            if not auth_data:
                 return None
-            with open(self.mal_auth_path, encoding="utf-8") as f:
-                auth_data = json.load(f)
-            return auth_data.get("access_token")
+            if auth_data.get("auth_error"):
+                self._notify_mal_auth_error()
+                return None
+            access_token = auth_data.get("access_token")
+            if not access_token:
+                self._notify_mal_auth_error("MyAnimeList: Incomplete credentials. Run setup_auth.py")
+                return None
+            return access_token
         except Exception as e:
             print(f"Error reading MAL access token: {e}")
             return None
@@ -654,6 +680,8 @@ class AniListUpdater:
 
         if not client_id or not refresh_token:
             print("Missing client_id or refresh_token in mal_auth.json. Please run setup_auth.py.")
+            self._set_mal_auth_error("Missing credentials")
+            self._notify_mal_auth_error("MyAnimeList: Incomplete credentials. Run setup_auth.py")
             return False
 
         data = {
@@ -672,6 +700,10 @@ class AniListUpdater:
             token_data = response.json()
             auth_data["access_token"] = token_data["access_token"]
             auth_data["refresh_token"] = token_data["refresh_token"]
+            if "expires_in" in token_data:
+                auth_data["expires_at"] = int(time.time()) + int(token_data["expires_in"])
+            auth_data.pop("auth_error", None)
+            auth_data.pop("auth_error_reason", None)
 
             if not self._write_mal_auth(auth_data):
                 return False
@@ -679,13 +711,26 @@ class AniListUpdater:
             self.mal_access_token = token_data["access_token"]
             print("MAL token refreshed successfully!")
             return True
+
         print(f"Failed to refresh MAL token: {response.status_code} - {response.text}")
+        if response.status_code in {400, 401}:
+            self._set_mal_auth_error(f"Refresh rejected ({response.status_code})")
+            self._notify_mal_auth_error("MyAnimeList: Authorization expired. Run setup_auth.py")
         return False
 
     def _make_mal_api_request(
         self, endpoint: str, method: str = "GET", data: dict[str, Any] | None = None, *, is_retry: bool = False
     ) -> dict[str, Any] | None:
         """Make REST request to MyAnimeList API v2."""
+        auth_data = self._read_mal_auth()
+        if auth_data and auth_data.get("auth_error"):
+            self._notify_mal_auth_error()
+            return None
+
+        if auth_data and "expires_at" in auth_data and time.time() >= auth_data["expires_at"] - 60:
+            if not self._refresh_mal_access_token():
+                return None
+
         if not self.mal_access_token:
             self.mal_access_token = self._load_mal_access_token()
             if not self.mal_access_token:
@@ -693,7 +738,7 @@ class AniListUpdater:
 
         headers = {
             "Authorization": f"Bearer {self.mal_access_token}",
-            "User-Agent": "mpv-anilist-updater"
+            "User-Agent": "mpv-anilist-updater",
         }
         url = f"https://api.myanimelist.net/v2/{endpoint}"
 
@@ -715,8 +760,16 @@ class AniListUpdater:
         if response is None:
             return None
 
-        if response.status_code == 401 and not is_retry and self._refresh_mal_access_token():
-            return self._make_mal_api_request(endpoint, method, data, is_retry=True)
+        if response.status_code in {401, 403} and not is_retry:
+            if self._refresh_mal_access_token():
+                return self._make_mal_api_request(endpoint, method, data, is_retry=True)
+            self._set_mal_auth_error(f"API {response.status_code}")
+            self._notify_mal_auth_error("MyAnimeList: Authorization expired. Run setup_auth.py")
+            return None
+        if response.status_code in {401, 403} and is_retry:
+            self._set_mal_auth_error(f"API {response.status_code} on retry")
+            self._notify_mal_auth_error("MyAnimeList: Authorization failed. Run setup_auth.py")
+            return None
 
         if response.status_code in {200, 201, 204}:
             try:
@@ -758,6 +811,14 @@ class AniListUpdater:
         if not os.path.exists(self.mal_auth_path):
             return
 
+        auth_data = self._read_mal_auth()
+        if not auth_data:
+            return
+
+        if auth_data.get("auth_error"):
+            self._notify_mal_auth_error()
+            return
+
         # Map AniList status to MAL status
         mal_status = None
         if status:
@@ -793,7 +854,7 @@ class AniListUpdater:
             update_data["finish_date"] = date.today().isoformat()
         if score is not None and score > 0:
             update_data["score"] = score
-            
+
         if increment_rewatch_count:
             get_endpoint = f"anime/{mal_id}?fields=my_list_status"
             get_response = self._make_mal_api_request(get_endpoint, method="GET")
@@ -804,10 +865,29 @@ class AniListUpdater:
         response = self._make_mal_api_request(endpoint, method="PATCH", data=update_data)
         if not response or "num_episodes_watched" not in response:
             print("Failed to update MAL entry.")
+            if not getattr(self, "_mal_auth_notified", False):
+                osd_message("MyAnimeList: Failed to update entry.")
+        else:
+            print("Successfully updated MAL entry.")
 
     # ──────────────────────────────────────────────────────────────────────────────────────────────────
     # SHIKIMORI API COMMUNICATION
     # ──────────────────────────────────────────────────────────────────────────────────────────────────
+
+    def _notify_shiki_auth_error(
+        self, message: str = "Shikimori: Authorization expired. Run setup_auth_shiki.py"
+    ) -> None:
+        if not getattr(self, "_shiki_auth_notified", False):
+            self._shiki_auth_notified = True
+            osd_message(message)
+
+    def _set_shiki_auth_error(self, reason: str = "") -> None:
+        auth_data = self._read_shiki_auth()
+        if auth_data:
+            auth_data["auth_error"] = True
+            if reason:
+                auth_data["auth_error_reason"] = reason
+            self._write_shiki_auth(auth_data)
 
     def _load_shiki_credentials(self) -> tuple[str | None, int | None]:
         """
@@ -817,11 +897,18 @@ class AniListUpdater:
             tuple[str | None, int | None]: Access token and user ID.
         """
         try:
-            if not os.path.exists(self.shiki_auth_path):
+            auth_data = self._read_shiki_auth()
+            if not auth_data:
                 return None, None
-            with open(self.shiki_auth_path, encoding="utf-8") as f:
-                auth_data = json.load(f)
-            return auth_data.get("access_token"), auth_data.get("user_id")
+            if auth_data.get("auth_error"):
+                self._notify_shiki_auth_error()
+                return None, None
+            access_token = auth_data.get("access_token")
+            user_id = auth_data.get("user_id")
+            if not access_token or not user_id:
+                self._notify_shiki_auth_error("Shikimori: Incomplete credentials. Run setup_auth_shiki.py")
+                return None, None
+            return access_token, user_id
         except Exception as e:
             print(f"Error reading Shikimori credentials: {e}")
             return None, None
@@ -860,6 +947,8 @@ class AniListUpdater:
             print(
                 "Missing client_id, client_secret, or refresh_token in shiki_auth.json. Please run setup_auth_shiki.py."
             )
+            self._set_shiki_auth_error("Missing credentials")
+            self._notify_shiki_auth_error("Shikimori: Incomplete credentials. Run setup_auth_shiki.py")
             return False
 
         headers = {
@@ -883,6 +972,10 @@ class AniListUpdater:
             token_data = response.json()
             auth_data["access_token"] = token_data["access_token"]
             auth_data["refresh_token"] = token_data["refresh_token"]
+            if "expires_in" in token_data:
+                auth_data["expires_at"] = int(time.time()) + int(token_data["expires_in"])
+            auth_data.pop("auth_error", None)
+            auth_data.pop("auth_error_reason", None)
 
             if not self._write_shiki_auth(auth_data):
                 return False
@@ -890,7 +983,11 @@ class AniListUpdater:
             self.shiki_access_token = token_data["access_token"]
             print("Shikimori token refreshed successfully!")
             return True
+
         print(f"Failed to refresh Shikimori token: {response.status_code} - {response.text}")
+        if response.status_code in {400, 401}:
+            self._set_shiki_auth_error(f"Refresh rejected ({response.status_code})")
+            self._notify_shiki_auth_error("Shikimori: Authorization expired. Run setup_auth_shiki.py")
         return False
 
     def _make_shiki_api_request(
@@ -903,9 +1000,18 @@ class AniListUpdater:
         is_retry: bool = False,
     ) -> Any:  # noqa: ANN401
         """Make REST request to Shikimori API."""
+        auth_data = self._read_shiki_auth()
+        if auth_data and auth_data.get("auth_error"):
+            self._notify_shiki_auth_error()
+            return None
+
+        if auth_data and "expires_at" in auth_data and time.time() >= auth_data["expires_at"] - 60:
+            if not self._refresh_shiki_access_token():
+                return None
+
         if not self.shiki_access_token or not self.shiki_user_id:
             self.shiki_access_token, self.shiki_user_id = self._load_shiki_credentials()
-            if not self.shiki_access_token:
+            if not self.shiki_access_token or not self.shiki_user_id:
                 return None
 
         headers = {
@@ -937,8 +1043,16 @@ class AniListUpdater:
         if response is None:
             return None
 
-        if response.status_code == 401 and not is_retry and self._refresh_shiki_access_token():
-            return self._make_shiki_api_request(endpoint, method, json_data, params, is_retry=True)
+        if response.status_code in {401, 403} and not is_retry:
+            if self._refresh_shiki_access_token():
+                return self._make_shiki_api_request(endpoint, method, json_data, params, is_retry=True)
+            self._set_shiki_auth_error(f"API {response.status_code}")
+            self._notify_shiki_auth_error("Shikimori: Authorization expired. Run setup_auth_shiki.py")
+            return None
+        if response.status_code in {401, 403} and is_retry:
+            self._set_shiki_auth_error(f"API {response.status_code} on retry")
+            self._notify_shiki_auth_error("Shikimori: Authorization failed. Run setup_auth_shiki.py")
+            return None
 
         if response.status_code in {200, 201, 204}:
             try:
@@ -958,6 +1072,14 @@ class AniListUpdater:
             return
 
         if not os.path.exists(self.shiki_auth_path):
+            return
+
+        auth_data = self._read_shiki_auth()
+        if not auth_data:
+            return
+
+        if auth_data.get("auth_error"):
+            self._notify_shiki_auth_error()
             return
 
         if not self.shiki_access_token or not self.shiki_user_id:
@@ -986,6 +1108,10 @@ class AniListUpdater:
             "target_type": "Anime"
         }
         rates = self._make_shiki_api_request("v2/user_rates", method="GET", params=params)
+        if rates is None:
+            if not getattr(self, "_shiki_auth_notified", False):
+                osd_message("Shikimori: Failed to fetch user rates.")
+            return
 
         rate_id = None
         current_rewatches = 0
@@ -1036,6 +1162,10 @@ class AniListUpdater:
 
         if not response or "id" not in response:
             print("Failed to update Shikimori entry.")
+            if not getattr(self, "_shiki_auth_notified", False):
+                osd_message("Shikimori: Failed to update entry.")
+        else:
+            print("Successfully updated Shikimori entry.")
 
     # ──────────────────────────────────────────────────────────────────────────────────────────────────
     # SEASON & EPISODE HANDLING
@@ -1077,6 +1207,36 @@ class AniListUpdater:
     # FILE PROCESSING & PARSING
     # ──────────────────────────────────────────────────────────────────────────────────────────────────
 
+    def check_auth_status(self) -> None:
+        """Check for known auth issues and notify via OSD if any platform is in an error state."""
+        # 1. AniList check
+        if not self.access_token:
+            token_path = os.path.join(os.path.dirname(__file__), "anilistToken.txt")
+            if not os.path.exists(token_path) or not os.path.getsize(token_path):
+                osd_message("AniList: Missing token! Check anilistToken.txt")
+
+        # 2. Shikimori check
+        if os.path.exists(self.shiki_auth_path):
+            shiki_data = self._read_shiki_auth()
+            if shiki_data:
+                if shiki_data.get("auth_error"):
+                    self._notify_shiki_auth_error("Shikimori: Authorization expired. Run setup_auth_shiki.py")
+                elif "expires_at" in shiki_data and time.time() >= shiki_data["expires_at"]:
+                    self._refresh_shiki_access_token()
+                elif not shiki_data.get("access_token") or not shiki_data.get("user_id"):
+                    self._notify_shiki_auth_error("Shikimori: Incomplete credentials. Run setup_auth_shiki.py")
+
+        # 3. MyAnimeList check
+        if os.path.exists(self.mal_auth_path):
+            mal_data = self._read_mal_auth()
+            if mal_data:
+                if mal_data.get("auth_error"):
+                    self._notify_mal_auth_error("MyAnimeList: Authorization expired. Run setup_auth.py")
+                elif "expires_at" in mal_data and time.time() >= mal_data["expires_at"]:
+                    self._refresh_mal_access_token()
+                elif not mal_data.get("access_token"):
+                    self._notify_mal_auth_error("MyAnimeList: Incomplete credentials. Run setup_auth.py")
+
     def handle_filename(self, filename: str) -> None:
         """
         Handle file processing for the info action: parse, check cache, output info.
@@ -1084,6 +1244,7 @@ class AniListUpdater:
         Args:
             filename (str): Path to video file.
         """
+        self.check_auth_status()
         file_info = self.parse_filename(filename)
         cache_entry = self.check_and_clean_cache(filename, file_info.name, file_info.episode)
         result = None
@@ -2006,6 +2167,10 @@ class AniListUpdater:
 
         if "status" not in variables and "progress" not in variables and "score" not in variables:
             raise ValueError("At least one of status, progress, or score must be provided.")
+
+        if not self.access_token:
+            osd_message("AniList: Missing token! Check anilistToken.txt")
+            raise Exception("AniList: Missing token! Check anilistToken.txt")
 
         return self._make_api_request(query, variables, self.access_token)
 
