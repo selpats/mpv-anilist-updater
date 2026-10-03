@@ -117,6 +117,7 @@ class AniListQueries:
                             relationType
                             node {
                                 id
+                                idMal
                                 format
                                 episodes
                                 mediaListEntry {
@@ -158,6 +159,7 @@ class AniListQueries:
                             relationType
                             node {
                                 id
+                                idMal
                                 format
                                 episodes
                                 mediaListEntry {
@@ -202,7 +204,9 @@ class AniListQueries:
                             relationType
                             node {
                                 id
+                                idMal
                                 format
+                                episodes
                                 title {
                                     romaji
                                 }
@@ -236,7 +240,9 @@ class AniListQueries:
                             relationType
                             node {
                                 id
+                                idMal
                                 format
+                                episodes
                                 title {
                                     romaji
                                 }
@@ -274,6 +280,26 @@ class AniListQueries:
                     status
                     progress
                     score
+                }
+            }
+        }
+    """
+
+    # Query to get anime relations for split-cour detection
+    GET_ANIME_RELATIONS = """
+        query($id: Int) {
+            Media(id: $id, type: ANIME) {
+                id
+                idMal
+                relations {
+                    edges {
+                        relationType
+                        node {
+                            id
+                            idMal
+                            episodes
+                        }
+                    }
                 }
             }
         }
@@ -1171,6 +1197,71 @@ class AniListUpdater:
     # SEASON & EPISODE HANDLING
     # ──────────────────────────────────────────────────────────────────────────────────────────────────
 
+    def get_mal_split_cour_info(self, anime_id: int | None, mal_id: int | None) -> tuple[int, bool]:
+        """
+        Check if AniList split a season into multiple entries sharing the same idMal.
+
+        Args:
+            anime_id (int | None): AniList media ID.
+            mal_id (int | None): MyAnimeList anime ID.
+
+        Returns:
+            tuple[int, bool]: (mal_episode_offset, has_mal_sequel)
+        """
+        if not anime_id or not mal_id:
+            return 0, False
+
+        cache = self.load_cache()
+        split_cache = cache.setdefault("__mal_split_cour__", {})
+        str_id = str(anime_id)
+        if str_id in split_cache:
+            data = split_cache[str_id]
+            return data.get("offset", 0), data.get("has_sequel", False)
+
+        total_offset = 0
+        has_sequel = False
+        visited = {anime_id}
+
+        try:
+            query = AniListQueries.GET_ANIME_RELATIONS
+            initial_res = self._make_api_request(query, {"id": anime_id}, self.access_token)
+            media = initial_res.get("data", {}).get("Media")
+            if media:
+                for edge in media.get("relations", {}).get("edges", []):
+                    if edge.get("relationType") == "SEQUEL":
+                        node = edge.get("node", {})
+                        if node.get("idMal") == mal_id:
+                            has_sequel = True
+                            break
+
+                # Traverse PREQUEL chain with the same idMal to accumulate episode offset
+                curr_media = media
+                while True:
+                    prequel_node = None
+                    for edge in curr_media.get("relations", {}).get("edges", []):
+                        if edge.get("relationType") == "PREQUEL":
+                            node = edge.get("node", {})
+                            if node.get("idMal") == mal_id and node.get("id") not in visited:
+                                prequel_node = node
+                                break
+
+                    if not prequel_node:
+                        break
+
+                    total_offset += prequel_node.get("episodes") or 0
+                    visited.add(prequel_node["id"])
+
+                    next_res = self._make_api_request(query, {"id": prequel_node["id"]}, self.access_token)
+                    curr_media = next_res.get("data", {}).get("Media") or {}
+        except Exception as e:
+            print(f"Error fetching split-cour info for AniList ID {anime_id}: {e}")
+
+        split_cache[str_id] = {"offset": total_offset, "has_sequel": has_sequel}
+        self.save_cache(cache)
+        if total_offset > 0 or has_sequel:
+            print(f"Split-cour info for MAL ID {mal_id}: offset=+{total_offset}, has_sequel={has_sequel}")
+        return total_offset, has_sequel
+
     # Finds the season and episode of an anime with absolute numbering
     def find_season_and_episode(
         self, seasons: list[dict[str, Any]] | None, absolute_episode: int
@@ -1291,6 +1382,12 @@ class AniListUpdater:
             result = self.refresh_anime_info_by_id(result)
 
         if result:
+            mal_offset = 0
+            if result.anime_id and result.mal_id:
+                try:
+                    mal_offset, _ = self.get_mal_split_cour_info(result.anime_id, result.mal_id)
+                except Exception:
+                    pass
             payload = {
                 "anime_id": result.anime_id,
                 "mal_id": result.mal_id,
@@ -1302,6 +1399,7 @@ class AniListUpdater:
                 "guessed_name": file_info.name,
                 "absolute_episode": file_info.episode,
                 "current_score": result.current_score,
+                "mal_offset": mal_offset,
             }
             print(f"INFO:{json.dumps(payload)}")
             if not self.options.get("ADD_ENTRY_IF_MISSING", False) and result.current_status is None and (result.file_progress == 1 or file_info.episode == 1):
@@ -1953,6 +2051,9 @@ class AniListUpdater:
         if anime_id is None:
             raise Exception("Couldn't find that anime! Make sure it is on your list and the title is correct.")
 
+        mal_offset, has_mal_sequel = self.get_mal_split_cour_info(anime_id, mal_id)
+        mal_progress = (file_progress + mal_offset) if file_progress is not None else None
+
         should_add_entry = current_progress is None and current_status is None
         is_last_episode = file_progress == total_episodes
 
@@ -1976,14 +2077,15 @@ class AniListUpdater:
             ):
                 raise Exception(f"Failed to add '{anime_name}' to your list.")
 
+            mal_initial_status = "CURRENT" if (has_mal_sequel and initial_status == "COMPLETED") else initial_status
             self.update_mal_entry(
                 mal_id,
-                initial_status,
-                file_progress,
-                set_start_date=(initial_status == "CURRENT"),
-                set_finish_date=(initial_status == "COMPLETED"),
+                mal_initial_status,
+                mal_progress,
+                set_start_date=(mal_initial_status == "CURRENT"),
+                set_finish_date=(mal_initial_status == "COMPLETED"),
             )
-            self.update_shiki_entry(mal_id, initial_status, file_progress)
+            self.update_shiki_entry(mal_id, mal_initial_status, mal_progress)
             osd_message(f'Added "{anime_name}" to your list with progress: {file_progress}')
 
             return AnimeInfo(
@@ -2014,8 +2116,9 @@ class AniListUpdater:
             # Step 2: Set progress to 1
             response = self._save_media_list_entry(anime_id, None, 1)
 
-            self.update_mal_entry(mal_id, "REPEATING", 1, is_rewatching=True)
-            self.update_shiki_entry(mal_id, "rewatching", 1)
+            mal_rewatch_progress = (1 + mal_offset) if mal_offset else 1
+            self.update_mal_entry(mal_id, "REPEATING", mal_rewatch_progress, is_rewatching=True)
+            self.update_shiki_entry(mal_id, "rewatching", mal_rewatch_progress)
             updated_progress = response["data"]["SaveMediaListEntry"]["progress"]
             osd_message(f'Updated "{anime_name}" to REPEATING with progress: {updated_progress}')
 
@@ -2091,27 +2194,28 @@ class AniListUpdater:
             except Exception:
                 pass
 
+        mal_status = "CURRENT" if (has_mal_sequel and status_to_set == "COMPLETED") else status_to_set
         self.update_mal_entry(
             mal_id,
-            status_to_set,
-            file_progress,
-            is_rewatching=(True if status_to_set == "REPEATING" else (False if current_status == "REPEATING" and status_to_set == "COMPLETED" else None)),
+            mal_status,
+            mal_progress,
+            is_rewatching=(True if mal_status == "REPEATING" else (False if current_status == "REPEATING" and mal_status == "COMPLETED" else None)),
             set_start_date=(
-                (status_to_set == "CURRENT" or status_to_set == "COMPLETED")
+                (mal_status == "CURRENT" or mal_status == "COMPLETED")
                 and current_status != "CURRENT"
                 and current_status != "REPEATING"
             ),
             set_finish_date=(
-                status_to_set == "COMPLETED"
+                mal_status == "COMPLETED"
                 and current_status != "REPEATING"
             ),
             increment_rewatch_count=(
-                status_to_set == "COMPLETED"
+                mal_status == "COMPLETED"
                 and current_status == "REPEATING"
             ),
             score=mal_score,
         )
-        self.update_shiki_entry(mal_id, status_to_set, file_progress, score=mal_score)
+        self.update_shiki_entry(mal_id, mal_status, mal_progress, score=mal_score)
         updated_progress = response["data"]["SaveMediaListEntry"]["progress"]
         updated_status = response["data"]["SaveMediaListEntry"]["status"]
         osd_message(f'Updated "{anime_name}" to: {updated_progress}')
