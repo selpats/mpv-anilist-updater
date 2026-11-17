@@ -5,6 +5,8 @@ queue.json
 queue.lock
 cache.lock
 *.tmp
+mal_auth.json
+shiki_auth.json
 __pycache__
 .vscode
 .pytest_cache
