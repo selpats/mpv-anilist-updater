@@ -29,7 +29,7 @@ _MEDIA_FIELDS = """
         status
         startDate { year }
         mediaListEntry { status progress }
-        relations { edges { relationType node { id format } } }
+        relations { edges { relationType node { id idMal episodes format } } }
     }
 """
 
@@ -73,11 +73,31 @@ _SEARCH_TITLES = """
 """
 
 _SAVE_ENTRY = """
-    mutation($mediaId: Int, $progress: Int, $status: MediaListStatus, $score: Float) {
-        SaveMediaListEntry(mediaId: $mediaId, progress: $progress, status: $status, score: $score) {
+    mutation(
+        $mediaId: Int,
+        $progress: Int,
+        $status: MediaListStatus,
+        $score: Float,
+        $startedAt: FuzzyDateInput,
+        $completedAt: FuzzyDateInput
+    ) {
+        SaveMediaListEntry(
+            mediaId: $mediaId,
+            progress: $progress,
+            status: $status,
+            score: $score,
+            startedAt: $startedAt,
+            completedAt: $completedAt
+        ) {
             status
             progress
         }
+    }
+"""
+
+_SCORE_FORMAT = """
+    query {
+        Viewer { mediaListOptions { scoreFormat } }
     }
 """
 
@@ -96,6 +116,7 @@ _MEDIA_BY_ID = """
             title { romaji english }
             episodes
             mediaListEntry { status progress }
+            relations { edges { relationType node { id idMal episodes format } } }
         }
     }
 """
@@ -126,6 +147,7 @@ class AniListClient:
             tuple[str, int | None, tuple[str, ...]], tuple[list[dict[str, Any]], list[dict[str, Any]]]
         ] = {}
         self._entries: dict[int, dict[str, Any]] = {}
+        self._score_format: str | None = None
 
     @classmethod
     def from_token_file(cls, path: Path = TOKEN_PATH) -> Self:
@@ -254,7 +276,16 @@ class AniListClient:
             raise SkipUpdate("Scoring needs an AniList token.")
         data = self._post(_SCORE, {"id": anime_id})
         score_format = data["Viewer"]["mediaListOptions"]["scoreFormat"]
+        self._score_format = score_format
         return score_format, (data["Media"]["mediaListEntry"] or {}).get("score") or 0
+
+    def score_format(self) -> str | None:
+        """Read the user's AniList `ScoreFormat`, cached in memory for this run."""
+        if self._score_format is not None or not self._token:
+            return self._score_format
+        data = self._post(_SCORE_FORMAT, {})
+        self._score_format = data["Viewer"]["mediaListOptions"]["scoreFormat"]
+        return self._score_format
 
     def save_entry(
         self,
@@ -262,6 +293,7 @@ class AniListClient:
         status: Status | None = None,
         progress: int | None = None,
         score: float | None = None,
+        dates: dict[str, dict[str, int]] | None = None,
     ) -> dict[str, Any]:
         """Create or update a list entry, sending only what is given.
 
@@ -270,6 +302,7 @@ class AniListClient:
             status (Status | None): The new status.
             progress (int | None): The new progress.
             score (float | None): The new score, in the user's score format.
+            dates (dict[str, dict[str, int]] | None): Optional `startedAt` / `completedAt` fuzzy dates.
 
         Returns:
             dict[str, Any]: The saved entry's `status` and `progress`.
@@ -279,6 +312,8 @@ class AniListClient:
         """
         if not self._token:
             raise AniListError("No AniList token found. Put it in anilistToken.txt.", 401)
-        variables = {"mediaId": anime_id, "status": status, "progress": progress, "score": score}
+        variables: dict[str, Any] = {"mediaId": anime_id, "status": status, "progress": progress, "score": score}
+        if dates:
+            variables.update(dates)
         variables = {k: v for k, v in variables.items() if v is not None}
         return self._post(_SAVE_ENTRY, variables)["SaveMediaListEntry"]

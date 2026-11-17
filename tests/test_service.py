@@ -10,6 +10,7 @@ from anilist_updater.cache import Cache, Pending
 from anilist_updater.errors import AniListError, SkipUpdate
 from anilist_updater.models import AnimeInfo, Correction, Options, Status
 from anilist_updater.service import Service
+from anilist_updater.trackers import MalClient, ShikimoriClient, TrackerSync
 
 PATH = "/anime/[Group] Show - 05 [1080p].mkv"
 ENTRY = {"status": "CURRENT", "progress": 4}
@@ -18,16 +19,18 @@ ENTRY = {"status": "CURRENT", "progress": 4}
 class RecordingClient(FakeClient):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.saves, self.scores, self.searches = [], [], 0
+        self.saves, self.scores, self.dates, self.searches = [], [], [], 0
 
     def search(self, title, year, formats):
         self.searches += 1
         return super().search(title, year, formats)
 
-    def save_entry(self, anime_id, status=None, progress=None, score=None):
+    def save_entry(self, anime_id, status=None, progress=None, score=None, dates=None):
         self.saves.append((anime_id, status, progress))
         if score is not None:
             self.scores.append(score)
+        if dates is not None:
+            self.dates.append(dates)
         return {"status": status or "CURRENT", "progress": progress}
 
 
@@ -59,6 +62,11 @@ def test_info_response_carries_the_mal_id(monkeypatch, tmp_path):
     monkeypatch.setattr(AniListClient, "from_token_file", lambda: client)
     monkeypatch.setattr(cli, "Cache", lambda options: Cache(options, tmp_path / "cache.json"))
     monkeypatch.setattr(cli, "Pending", lambda: Pending(tmp_path / "queue.json"))
+    monkeypatch.setattr(
+        cli,
+        "TrackerSync",
+        lambda: TrackerSync(MalClient(tmp_path / "mal.json"), ShikimoriClient(tmp_path / "shiki.json")),
+    )
     request = {"action": "info", "path": PATH, "options": {}}
 
     assert cli.handle(request)["info"]["mal_id"] == 4242
@@ -71,6 +79,11 @@ def test_info_response_has_a_null_mal_id_when_anilist_has_none(monkeypatch, tmp_
     monkeypatch.setattr(AniListClient, "from_token_file", lambda: client)
     monkeypatch.setattr(cli, "Cache", lambda options: Cache(options, tmp_path / "cache.json"))
     monkeypatch.setattr(cli, "Pending", lambda: Pending(tmp_path / "queue.json"))
+    monkeypatch.setattr(
+        cli,
+        "TrackerSync",
+        lambda: TrackerSync(MalClient(tmp_path / "mal.json"), ShikimoriClient(tmp_path / "shiki.json")),
+    )
 
     response = cli.handle({"action": "info", "path": PATH, "options": {}})
     assert (response["ok"], response["info"]["mal_id"]) == (True, None)
@@ -195,10 +208,10 @@ class Flaky(RecordingClient):
             raise self.error
         return super().media_by_id(anime_id)
 
-    def save_entry(self, anime_id, status=None, progress=None, score=None):
+    def save_entry(self, anime_id, status=None, progress=None, score=None, dates=None):
         if self.down:
             raise self.error
-        return super().save_entry(anime_id, status, progress, score)
+        return super().save_entry(anime_id, status, progress, score, dates)
 
 
 def episode(number, anime_id=1, name="Show"):
