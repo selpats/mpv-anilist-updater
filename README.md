@@ -183,10 +183,34 @@ echo '{"action": "info", "path": "/anime/Frieren S2/[EMBER] Sousou no Frieren S2
 - A file with a list entry is remembered in `cache.json` next to the script.
 - If AniList can't be reached when an episode should be recorded (maintenance, rate limit, no connection), the update is kept in `queue.json` and sent after the next update or fresh detection that AniList answers.
 
+## MyAnimeList Integration
+
+To authenticate with MyAnimeList:
+1. Run the `setup_auth.py` script using Python:
+   ```bash
+   python setup_auth.py
+   ```
+2. Follow the on-screen instructions:
+   - Go to https://myanimelist.net/apiconfig and create a new App (App Type: `other`, Redirect URL: `http://localhost`).
+   - Copy the Client ID and paste it in the command prompt.
+   - Go to the authorization URL, click 'Allow', and paste the redirect URL back in the prompt.
+3. This creates a `mal_auth.json` file in the script directory, enabling simultaneous MyAnimeList updates.
+
+## Shikimori Integration
+
+To authenticate with Shikimori:
+1. Run the `setup_auth_shiki.py` script using Python:
+   ```bash
+   python setup_auth_shiki.py
+   ```
+2. Follow the on-screen instructions:
+   - Go to https://shikimori.io/oauth/applications and create a new application (Redirect URI: `urn:ietf:wg:oauth:2.0:oob`, Scopes: select `user_rates`).
+   - Copy both the Client ID and Client Secret and paste them in the prompt.
+   - Go to the authorization URL, click 'Authorize', and paste the generated code back in the prompt.
+3. This creates a `shiki_auth.json` file containing the authentication credentials and your user ID, enabling simultaneous Shikimori updates.
+
 ## Credits
 
-This script was inspired by [mpv-open-anilist-page](https://github.com/ehoneyse/mpv-open-anilist-page) by ehoneyse.
-
-The install commands were inspired by [uosc](https://github.com/tomasklaen/uosc)'s.
-
-This script only updates AniList. For a MyAnimeList version, check out the fork [mpv-mal-updater](https://github.com/locomotiv1/mpv-mal-updater). Take into account this is a fork not maintained by me so I can't guarantee its safety. It may also be outdated or work differently.
+- This script was inspired by [mpv-open-anilist-page](https://github.com/ehoneyse/mpv-open-anilist-page) by ehoneyse.
+- The install commands were inspired by [uosc](https://github.com/tomasklaen/uosc)'s.
+- MyAnimeList integration is based on [mpv-mal-updater](https://github.com/locomotiv1/mpv-mal-updater) by locomotiv1.

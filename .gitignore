@@ -3,6 +3,8 @@ anilistUpdater.conf
 cache.json
 queue.json
 queue.lock
+mal_auth.json
+shiki_auth.json
 __pycache__
 .vscode
 .pytest_cache
