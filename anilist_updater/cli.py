@@ -10,6 +10,7 @@ from .cache import Cache, Pending
 from .errors import SkipUpdate
 from .models import AnimeInfo, Correction, Options, Outcome
 from .service import Service
+from .trackers import TrackerSync
 
 log = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ def _run(request: dict[str, Any]) -> Outcome:
         return Outcome(score={"format": score_format, "value": value})
 
     options = Options.from_dict(request.get("options"))
-    service = Service(options, client, Cache(options), Pending())
+    service = Service(options, client, Cache(options), Pending(), TrackerSync())
     path = request["path"]
     info = AnimeInfo.from_dict(request.get("info"))
 
@@ -61,7 +62,7 @@ def handle(request: dict[str, Any]) -> dict[str, Any]:
         log.debug("Failed", exc_info=True)
         return _failure("error", str(e) or type(e).__name__)
 
-    return {
+    response: dict[str, Any] = {
         "ok": True,
         "kind": "success",
         "message": outcome.message,
@@ -69,6 +70,9 @@ def handle(request: dict[str, Any]) -> dict[str, Any]:
         "results": outcome.results,
         "score": outcome.score,
     }
+    if outcome.warnings:
+        response["warnings"] = outcome.warnings
+    return response
 
 
 def main() -> None:

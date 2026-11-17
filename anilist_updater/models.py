@@ -73,6 +73,8 @@ class AnimeInfo:
     guessed_name: str = ""
     absolute_episode: int = 1
     mal_id: int | None = None
+    mal_offset: int = 0
+    has_mal_sequel: bool = False
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any] | None) -> Self | None:
@@ -97,6 +99,7 @@ class Correction:
     episode: int | None = None
     status: Status | None = None
     score: float | None = None
+    score_format: str | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> Self:
@@ -107,6 +110,7 @@ class Correction:
             data.get("episode") or None,
             Status(status.upper()) if status else None,
             data.get("score"),
+            data.get("score_format"),
         )
 
 
@@ -150,3 +154,4 @@ class Outcome:
     message: str | None = None
     results: list[dict[str, Any]] | None = None
     score: dict[str, Any] | None = None
+    warnings: list[str] | None = None

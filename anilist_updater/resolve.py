@@ -289,8 +289,45 @@ def locate_episode(series: list[Media] | None, absolute: int) -> tuple[Media, in
     return None
 
 
+def _mal_split_cour(media: Media, graph: _Graph | None = None) -> tuple[int, bool]:
+    """Return `(mal_offset, has_mal_sequel)` when AniList split one MAL entry across multiple IDs."""
+    mal_id = media.get("idMal")
+    if not mal_id:
+        return 0, False
+
+    edges = media.get("relations", {}).get("edges", [])
+    has_sequel = any(e.get("relationType") == "SEQUEL" and e.get("node", {}).get("idMal") == mal_id for e in edges)
+
+    offset = 0
+    seen = {media["id"]}
+    cursor: Media | None = media
+    while cursor is not None:
+        prequel = next(
+            (
+                e["node"]
+                for e in cursor.get("relations", {}).get("edges", [])
+                if e.get("relationType") == "PREQUEL"
+                and e.get("node", {}).get("idMal") == mal_id
+                and e["node"]["id"] not in seen
+            ),
+            None,
+        )
+        if prequel is None:
+            break
+        seen.add(prequel["id"])
+        full = graph.get(prequel["id"]) if graph is not None else None
+        if full is None and graph is not None and graph.fetch is not None:
+            graph.load([prequel["id"]])
+            full = graph.get(prequel["id"])
+        episodes = prequel.get("episodes") if prequel.get("episodes") is not None else (full or {}).get("episodes")
+        offset += episodes or 0
+        cursor = full
+    return offset, has_sequel
+
+
 def _to_info(media: Media, episode: int, file: FileInfo) -> AnimeInfo:
     entry = media.get("mediaListEntry")
+    mal_offset, has_mal_sequel = _mal_split_cour(media)
     return AnimeInfo(
         anime_id=media["id"],
         anime_name=media_title(media),
@@ -301,6 +338,8 @@ def _to_info(media: Media, episode: int, file: FileInfo) -> AnimeInfo:
         guessed_name=file.query,
         absolute_episode=file.episode,
         mal_id=media.get("idMal"),
+        mal_offset=mal_offset,
+        has_mal_sequel=has_mal_sequel,
     )
 
 
@@ -655,14 +694,24 @@ def resolve(client: AniListClient, file: FileInfo) -> AnimeInfo:
     """
     formats = _formats(file)
     if file.absolute and file.absolute != file.episode and (info := _by_absolute(client, file, formats)):
-        return info
+        return _deep_mal_offset(client, info)
     if file.arc and (info := _by_arc(client, file, formats)):
-        return info
+        return _deep_mal_offset(client, info)
     # "Show S2/Show - 13" counted from the first season lands in a later one; else it is the folder's own number.
     # A file without a title ("Show Part 2/E12 - Welcome") is numbered within its folder.
     if not file.untitled and (info := _absolute_from_base(client, file)):
+        return _deep_mal_offset(client, info)
+    return _deep_mal_offset(client, _resolve_title(client, file, formats))
+
+
+def _deep_mal_offset(client: AniListClient, info: AnimeInfo) -> AnimeInfo:
+    """Walk multi-hop split-cour prequels when an entry already has a prequel sharing its `mal_id`."""
+    if not (info.mal_offset and info.anime_id and (fetch := _fetcher(client))):
         return info
-    return _resolve_title(client, file, formats)
+    if not (loaded := fetch([info.anime_id])).get(info.anime_id):
+        return info
+    offset, has_sequel = _mal_split_cour(loaded[info.anime_id], _Graph(list(loaded.values()), fetch))
+    return replace(info, mal_offset=offset, has_mal_sequel=has_sequel)
 
 
 def _after_earlier_parts(first: Media, file: FileInfo, graph: _Graph) -> int | None:
@@ -964,6 +1013,7 @@ def refresh(client: AniListClient, info: AnimeInfo, anime_id: int | None = None)
     same = media["id"] == info.anime_id
 
     progress, status = (entry["progress"], Status(entry["status"])) if entry else (None, None)
+    mal_offset, has_mal_sequel = _mal_split_cour(media, _Graph([media], _fetcher(client)))
 
     return replace(
         info,
@@ -973,4 +1023,6 @@ def refresh(client: AniListClient, info: AnimeInfo, anime_id: int | None = None)
         current_progress=progress,
         current_status=status,
         total_episodes=media.get("episodes"),
+        mal_offset=mal_offset,
+        has_mal_sequel=has_mal_sequel,
     )

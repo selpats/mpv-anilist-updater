@@ -20,20 +20,42 @@ local function osd(text, seconds)
     end
 end
 
+local function warning_text(response)
+    if response and type(response.warnings) == "table" and #response.warnings > 0 then
+        return table.concat(response.warnings, "\n")
+    end
+    return nil
+end
+
 -- Show a backend response. Failures to find or update something are only worth interrupting for
--- when the user asked; real errors always are.
+-- when the user asked; real errors and secondary tracker auth warnings always are.
 local function notify(response, manual)
     local kind = response.kind
+    local warnings = warning_text(response)
+    if warnings then
+        msg.warn(warnings)
+    end
     if kind == "cancelled" then
         return
     elseif kind == "error" then
-        mp.osd_message(response.message, 5)
+        local text = warnings and (response.message .. "\n" .. warnings) or response.message
+        mp.osd_message(text, warnings and 6 or 5)
     elseif kind == "skip" then
-        if manual then
-            osd(response.message, 5)
+        if manual and not silent and response.message then
+            local text = warnings and (response.message .. "\n" .. warnings) or response.message
+            mp.osd_message(text, warnings and 6 or 5)
+        elseif warnings then
+            mp.osd_message(warnings, 5)
         end
     elseif response.ok then
-        osd(response.message or "Updated anime correctly.", 5)
+        local body = (not silent) and (response.message or "Updated anime correctly.") or nil
+        if body and warnings then
+            mp.osd_message(body .. "\n" .. warnings, 6)
+        elseif warnings then
+            mp.osd_message(warnings, 5)
+        elseif body then
+            mp.osd_message(body, 5)
+        end
     end
 end
 
@@ -56,12 +78,21 @@ local function ensure_info(callback)
         end
         state.fetching = false
         state.info = response.ok and response.info or nil
+        local warnings = warning_text(response)
+        if warnings then
+            msg.warn(warnings)
+        end
         if state.info then
             local detected = (state.info.anime_name or "?") .. " #" .. (state.info.episode or "?")
             msg.info("Detected anime: " .. detected)
-            if config.options.SHOW_DETECTED_ANIME then
-                osd("Detected: " .. detected)
+            if config.options.SHOW_DETECTED_ANIME and not silent then
+                local text = "Detected: " .. detected
+                mp.osd_message(warnings and (text .. "\n" .. warnings) or text, warnings and 6 or 3)
+            elseif warnings then
+                mp.osd_message(warnings, 5)
             end
+        elseif warnings then
+            mp.osd_message(warnings, 5)
         end
 
         local waiting = state.waiting

@@ -321,6 +321,7 @@ local function submit()
         episode = episode,
         status = state.status_changed and STATUSES[state.status_index] or nil,
         score = score,
+        score_format = score ~= nil and state.score_format or nil,
     }
     local info, generation = state.info, state.generation
     close()
