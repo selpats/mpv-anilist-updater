@@ -1,4 +1,6 @@
+import ctypes
 import json
+import os
 import subprocess  # ruff: ignore[suspicious-subprocess-import]
 import sys
 from pathlib import Path
@@ -7,7 +9,7 @@ import pytest
 
 from anilist_updater.errors import ParseError
 from anilist_updater.models import FileInfo
-from anilist_updater.parsing import parse_path
+from anilist_updater.parsing import long_path, parse_path
 from anilist_updater.release import parse_release
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
@@ -413,3 +415,28 @@ def test_season_zero_file_in_a_season_folder_is_skipped():
     """The S00 number is TVDB's order of all specials; "(S01) Free! …/Free! S00E01" matched another season's special."""
     with pytest.raises(ParseError, match="season 0"):
         parse_path("(S01) Free! Iwatobi Swim Club/Free! S00E01-E02 FrFr! 1 Makoto's Problem!.mkv")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows 8.3 short paths")
+def test_windows_short_8_3_path_expands_to_real_title_and_episode(tmp_path):
+    folder = tmp_path / "Аниме папка"
+    folder.mkdir()
+    target = folder / "[Erai-raws] JoJo no Kimyou na Bouken - Steel Ball Run - 03 [1080p].mkv"
+    target.write_bytes(b"")
+
+    buf = ctypes.create_unicode_buffer(1024)
+    assert ctypes.windll.kernel32.GetShortPathNameW(str(target), buf, 1024) > 0
+    short = buf.value
+    if "~" not in short:
+        pytest.skip("Volume does not generate 8.3 short paths")
+
+    assert long_path(short) == str(target)
+    info = parse_path(short)
+    assert (info.title, info.episode) == ("JoJo no Kimyou na Bouken Steel Ball Run", 3)
+
+
+def test_long_path_leaves_streams_and_nonexistent_paths_alone():
+    url = "https://example.com/~user/video.mkv"
+    missing = "C:/nonexistent/PROGRA~1/Show - 01.mkv"
+    assert long_path(url) == url
+    assert long_path(missing) == missing

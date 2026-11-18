@@ -9,6 +9,7 @@ from .api import AniListClient
 from .cache import Cache, Pending
 from .errors import SkipUpdate
 from .models import AnimeInfo, Correction, Options, Outcome
+from .parsing import long_path
 from .service import Service
 from .trackers import TrackerSync
 
@@ -25,7 +26,7 @@ def _run(request: dict[str, Any]) -> Outcome:
 
     options = Options.from_dict(request.get("options"))
     service = Service(options, client, Cache(options), Pending(), TrackerSync())
-    path = request["path"]
+    path = long_path(request["path"])
     info = AnimeInfo.from_dict(request.get("info"))
 
     match request["action"]:

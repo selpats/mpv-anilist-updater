@@ -1,6 +1,7 @@
 """Turn a media path into a title, episode, year and format: the filename first, then its folders for a title."""
 
 import logging
+import os
 import re
 from dataclasses import dataclass, replace
 
@@ -178,6 +179,20 @@ def _unused_season_folder(parent: Release | None, grandparent: Release | None, r
     return (parent.season or 0) > 1 and bool(folder) and own.startswith(folder) and own != folder
 
 
+def long_path(path: str) -> str:
+    """Expand Windows 8.3 short paths (`PROGRA~1`) to full names when present on disk."""
+    if os.name != "nt" or "~" not in path or "://" in path:
+        return path
+    import ctypes  # ruff: ignore[import-outside-top-level]
+
+    get_long = ctypes.windll.kernel32.GetLongPathNameW
+    needed = get_long(path, None, 0)
+    if not needed:
+        return path
+    buf = ctypes.create_unicode_buffer(needed)
+    return buf.value if get_long(path, buf, needed) else path
+
+
 def parse_path(path: str, *, skip: bool = True) -> FileInfo:
     """Extract title, episode, year and format from a media path.
 
@@ -191,7 +206,7 @@ def parse_path(path: str, *, skip: bool = True) -> FileInfo:
     Raises:
         ParseError: If the file isn't an episode to record, or neither the filename nor its folders have a title.
     """
-    parts = _split_path(path)
+    parts = _split_path(long_path(path))
     name = parts[-1]
     release = parse_release(name)
     log.info("File name guess: %s -> %s", name, release)
