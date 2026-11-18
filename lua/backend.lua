@@ -6,8 +6,38 @@ local M = {}
 
 -- Windows installs often only put the py launcher on PATH; `current` moves on once one can't be started.
 local interpreters = { { "python3" } }
+local expand_long_path = function(path) return path end
 if mp.get_property("platform") == "windows" then
     interpreters = { { "python" }, { "py", "-3" } }
+    local ffi_ok, ffi = pcall(require, "ffi")
+    if ffi_ok then
+        pcall(ffi.cdef, "int MultiByteToWideChar(unsigned int CodePage, unsigned long dwFlags, const char* lpMultiByteStr, int cbMultiByte, wchar_t* lpWideCharStr, int cchWideChar);")
+        pcall(ffi.cdef, "unsigned long GetLongPathNameW(const wchar_t* lpszShortPath, wchar_t* lpszLongPath, unsigned long cchBuffer);")
+        pcall(ffi.cdef, "int WideCharToMultiByte(unsigned int CodePage, unsigned long dwFlags, const wchar_t* lpWideCharStr, int cchWideChar, char* lpMultiByteStr, int cbMultiByte, const char* lpDefaultChar, int* lpUsedDefaultChar);")
+        local C = ffi.C
+        local CP_UTF8 = 65001
+        expand_long_path = function(path)
+            if not path or not path:find("~", 1, true) then
+                return path
+            end
+            local ok, expanded = pcall(function()
+                local wlen = C.MultiByteToWideChar(CP_UTF8, 0, path, -1, nil, 0)
+                if wlen <= 0 then return path end
+                local wshort = ffi.new("wchar_t[?]", wlen)
+                C.MultiByteToWideChar(CP_UTF8, 0, path, -1, wshort, wlen)
+                local llen = C.GetLongPathNameW(wshort, nil, 0)
+                if llen <= 0 then return path end
+                local wlong = ffi.new("wchar_t[?]", llen)
+                if C.GetLongPathNameW(wshort, wlong, llen) <= 0 then return path end
+                local ulen = C.WideCharToMultiByte(CP_UTF8, 0, wlong, -1, nil, 0, nil, nil)
+                if ulen <= 0 then return path end
+                local utf8 = ffi.new("char[?]", ulen)
+                if C.WideCharToMultiByte(CP_UTF8, 0, wlong, -1, utf8, ulen, nil, nil) <= 0 then return path end
+                return ffi.string(utf8)
+            end)
+            return ok and expanded or path
+        end
+    end
 end
 local current = 1
 local entry_point = config.script_dir .. "anilistUpdater.py"
@@ -40,6 +70,7 @@ function M.get_path()
     end
     -- "path" is sometimes absolute and sometimes relative
     local path = utils.join_path(directory, mp.get_property("path") or "")
+    path = expand_long_path(path)
 
     if (path:match("([^/\\]+)$") or ""):lower() == "file.mp4" and title and title ~= "" then
         return title
